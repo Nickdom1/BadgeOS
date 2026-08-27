@@ -194,6 +194,24 @@
 
           devShells = {
             v1 = pkgs.nixbadge-v1.shell;
+
+            # HDMI bring-up rig (issue #4): laptop-side tooling for driving the
+            # badge over ssh and reading the HDMI output back through a USB
+            # capture dongle. See tools/hdmi-rig/README.md.
+            hdmi-rig = pkgs.mkShell {
+              packages = with pkgs; [
+                sshpass
+                openssh
+                ffmpeg
+                v4l-utils
+                i2c-tools
+                (python3.withPackages (ps: with ps; [ numpy pillow ]))
+              ];
+              shellHook = ''
+                export PATH="$PWD/tools/hdmi-rig:$PATH"
+                echo "hdmi-rig: badge-run.sh / recipe-run.sh / frame-grab.sh on PATH (tools/hdmi-rig/README.md)"
+              '';
+            };
           };
         };
     };
