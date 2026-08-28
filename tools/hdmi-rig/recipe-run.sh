@@ -7,7 +7,8 @@
 #   4  landscape white baseline (720p sync anchor)
 #  10  hardware colorbar via VO_IOCTL_PATTERN (no producer needed)
 #
-# Env: BADGE_HOST / BADGE_USER / BADGE_PASS as in badge-run.sh.
+# Env: BADGE_HOST / BADGE_USER / BADGE_PASS as in badge-run.sh (defaults are
+# the scpcom image's publicly documented stock login — lab rig, not secrets).
 # The sudo password is auto-supplied — do not type anything, just wait.
 set -u
 N="${1:-4}"
