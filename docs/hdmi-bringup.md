@@ -36,6 +36,25 @@ The bridge locks sync but its video FIFO never receives pixel payload — the
 video long packets are emitted by the host and never accepted by the bridge's
 DSI unpacker. Both endpoints check out; the handoff fails.
 
+## NixOS vendor-ARM parity (2026-08-28)
+
+The whole bring-up now reproduces on the flake's `duo-s-arm-vendor` image (vendor
+5.10 arm64 kernel + display stack + `badge-hdmi.service`) — no Debian rig needed.
+First boot on hardware exposed the port's one gap: the service reached
+DSI-link-up and the VO colorbar, then failed on the *first* LT8912B I2C write —
+the bridge never ACKed on IIC2. Root cause: the IIC2 pads (`porte0/1`) power on
+at their default mux `funcsel = 3` (PWR_GPIO); the DTS `/delete-property/` frees
+them from `vo`/`mipi_tx` but nothing muxes them *to* I2C. Writing `funcsel = 0`
+(IIC2 primary — the same mux the M1 mainline commit uses; FMUX regs
+`0x030010b8`/`0x030010bc`, base `0x03001000`) makes the bridge appear (chip id
+`0x12`/`0xb2`), and the full recipe then runs clean and lands on the **same
+starvation pinstripe, pixel-class-identical to the Debian-rig baseline capture**
+(mean abs pixel diff 2.3 — capture noise only). So the SG2000 → DSI → LT8912B path
+is proven end-to-end on NixOS and hits the identical wall as Debian; Front B
+(below) is now the critical path on NixOS too. Fix: `badge-hdmi-up` re-asserts
+the IIC2 pinmux before the bridge writes (the NixOS analogue of the vendor
+`cvi-pinmux -w IIC2_SCL/IIC2_SDA`).
+
 ## Leading theory: DSI dialect mismatch
 
 The mainline LT8912B driver requests `MIPI_DSI_MODE_VIDEO | LPM |
@@ -70,5 +89,8 @@ yet measured**; and the MAC does drive a real DSI panel in vendor products, so
 
 * **The badge is a CTF prize — preserve it.** SD boot and insmod are fine;
   never flash the eMMC.
-* Userspace MMIO writes (and `sample_vio`) wedge the SoC; reads are safe.
+* Userspace MMIO writes to the display blocks (and `sample_vio`) wedge the
+  SoC; reads are safe everywhere. The `0x03001000` pinmux block is the proven
+  exception: the vendor's own `cvi-pinmux` and our `badge-hdmi-up` write it
+  from userspace on every boot.
 * Capture dongle quirks are documented in `tools/hdmi-rig/README.md`.
