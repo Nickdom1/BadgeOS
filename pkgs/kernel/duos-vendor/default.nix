@@ -24,7 +24,11 @@ let
   # and expand to a full .config. Done in a derivation so we get the kernel build
   # tools without fighting the host toolchain.
   configfile = runCommand "duos-vendor-kernel-config" {
-    nativeBuildInputs = with buildPackages; [ gnumake bison flex bc gcc perl gawk ];
+    # buildPackages.gcc here is the build->build compiler (plain `gcc`); the
+    # single-buildPackages one is the cross wrapper (aarch64-*-gcc) and leaves
+    # kconfig's HOSTCC unresolvable. Same idiom as pkgs/firmware/duos-*-dtb.nix.
+    nativeBuildInputs = (with buildPackages; [ gnumake bison flex bc perl gawk ])
+      ++ [ buildPackages.buildPackages.gcc ];
   } ''
     cp -r ${src} ksrc
     chmod -R +w ksrc
