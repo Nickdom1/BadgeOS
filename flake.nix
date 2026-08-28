@@ -64,6 +64,25 @@
           ];
         };
 
+      # ARM core on the VENDOR 5.10 kernel — the display bring-up variant
+      # (issue #4). Additive: the mainline arm/riscv configs are untouched.
+      # Different module list from mkDuoS because base.nix carries
+      # mainline-only kernel patches (see core-arm-vendor.nix header).
+      mkDuoSVendor =
+        { buildPlatform }:
+        nixpkgs-2605.lib.nixosSystem {
+          modules = [
+            {
+              nixpkgs.hostPlatform = "aarch64-linux";
+              nixpkgs.buildPlatform = buildPlatform;
+            }
+            ./modules/duo-s/common.nix
+            ./modules/duo-s/leds.nix
+            ./modules/duo-s/core-arm-vendor.nix
+            ./modules/duo-s/badge-hdmi.nix
+          ];
+        };
+
       # All sensible (core, buildPlatform) pairs for one core. We keep the
       # native host plus the practical cross hosts, and drop nonsense like
       # building an aarch64 target from a riscv64 box.
@@ -124,6 +143,71 @@
         in
         mkImg { inherit bootDir root; };
 
+      # ARM-only variant of the vendor image: both boot trees carry the vendor
+      # ARM system (the riscv64 toggle position will not boot — use the Debian
+      # card for riscv). Exists so display-bring-up testing does not gate on
+      # cross-building the entire riscv userland. Prefer duo-s-sdcard-vendor
+      # (the real combined image) when build resources allow.
+      sdcardVendorArmOnlyFor =
+        buildSystem:
+        let
+          pkgs = nixpkgs-2605.legacyPackages.${buildSystem};
+          armSys = self.nixosConfigurations."duo-s-arm-vendor-x86_64";
+          fipArmReal = import ./pkgs/firmware/fip.nix { inherit pkgs; };
+          fipRiscvReal = import ./pkgs/firmware/fip.nix {
+            inherit pkgs;
+            core = "riscv";
+          };
+          mkCombinedRoot = import ./pkgs/sdcard/make-combined-root.nix { inherit pkgs; };
+          mkBoot = import ./pkgs/sdcard/make-boot-dir.nix { inherit pkgs; };
+          mkImg = import ./pkgs/sdcard/make-sd-image.nix { inherit pkgs; };
+          root = mkCombinedRoot {
+            systems = [ armSys ];
+            label = "NIXOS_ROOT";
+          };
+          bootDir = mkBoot {
+            inherit armSys;
+            riscvSys = armSys;
+            fipArm = fipArmReal;
+            fipRiscv = fipRiscvReal;
+            defaultCore = "arm";
+          };
+        in
+        mkImg { inherit bootDir root; };
+
+      # Same combined image, but the ARM side runs the VENDOR 5.10 kernel with
+      # the display stack (issue #4). RISC-V side unchanged mainline. Only
+      # defined for x86_64 build hosts (the only vendor variant we generate).
+      sdcardVendorFor =
+        buildSystem:
+        let
+          pkgs = nixpkgs-2605.legacyPackages.${buildSystem};
+          armSys = self.nixosConfigurations."duo-s-arm-vendor-x86_64";
+          riscvSys = self.nixosConfigurations."duo-s-riscv-${shortArch buildSystem}";
+          fipArmReal = import ./pkgs/firmware/fip.nix { inherit pkgs; };
+          fipRiscvReal = import ./pkgs/firmware/fip.nix {
+            inherit pkgs;
+            core = "riscv";
+          };
+          mkCombinedRoot = import ./pkgs/sdcard/make-combined-root.nix { inherit pkgs; };
+          mkBoot = import ./pkgs/sdcard/make-boot-dir.nix { inherit pkgs; };
+          mkImg = import ./pkgs/sdcard/make-sd-image.nix { inherit pkgs; };
+          root = mkCombinedRoot {
+            systems = [
+              armSys
+              riscvSys
+            ];
+            label = "NIXOS_ROOT";
+          };
+          bootDir = mkBoot {
+            inherit armSys riscvSys;
+            fipArm = fipArmReal;
+            fipRiscv = fipRiscvReal;
+            defaultCore = "arm";
+          };
+        in
+        mkImg { inherit bootDir root; };
+
       # Native -> duo-s-<core>; cross -> duo-s-<core>-<buildArch>. So:
       #   duo-s-arm, duo-s-arm-x86_64,
       #   duo-s-riscv, duo-s-riscv-x86_64, duo-s-riscv-aarch64
@@ -143,7 +227,9 @@
         versionTemplate = "2.0-<lastModifiedDate>-<rev>";
 
         # badgeOS NixOS systems (built against nixpkgs 26.05).
-        nixosConfigurations = duosNixosConfigurations;
+        nixosConfigurations = duosNixosConfigurations // {
+          duo-s-arm-vendor-x86_64 = mkDuoSVendor { buildPlatform = "x86_64-linux"; };
+        };
       };
 
       systems = [
@@ -185,11 +271,19 @@
           # that can build it.
           // duosLib.optionalAttrs (duosLib.elem system duosBuildSystems) {
             duo-s-sdcard = sdcardFor system;
+          }
+          // duosLib.optionalAttrs (system == "x86_64-linux") {
+            duo-s-sdcard-vendor = sdcardVendorFor system;
+            duo-s-sdcard-vendor-armonly = sdcardVendorArmOnlyFor system;
           };
 
           packages = {
             default = pkgs.duo-s-sdcard;
             v1 = pkgs.nixbadge-v1;
+          }
+          // duosLib.optionalAttrs (system == "x86_64-linux") {
+            duo-s-sdcard-vendor = pkgs.duo-s-sdcard-vendor;
+            duo-s-sdcard-vendor-armonly = pkgs.duo-s-sdcard-vendor-armonly;
           };
 
           devShells = {
