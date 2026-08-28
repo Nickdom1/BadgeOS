@@ -57,21 +57,30 @@
 	/delete-property/ mute-gpio-r;
 };
 
-/* mipi dsi for u-boot */
+/* mipi dsi for u-boot.
+ * BADGE: no pwm-gpio / power-ct-gpio. The dev-board values are porte 0/1,
+ * which on the Nix Badge 2.0 are the IIC2 SCL/SDA pads wired to the LT8912B
+ * HDMI bridge; letting vo/mipi_tx claim them as GPIOs kills the bridge's I2C
+ * bus (the Debian rig fights this at runtime with cvi-pinmux re-asserts —
+ * archive GOLDEN-first-hdmi-out.md fix #2). The driver treats the absent properties
+ * as -EINVAL and skips them (vo_mipi_tx.c of_get_named_gpio_flags fallback).
+ */
 &vo {
 	compatible = "cvitek,vo";
 	reset-gpio = <&porte 2 GPIO_ACTIVE_LOW>;
-	pwm-gpio = <&porte 0 GPIO_ACTIVE_HIGH>;
-	power-ct-gpio = <&porte 1 GPIO_ACTIVE_HIGH>;
+	/* the base dtsi (cv181x_base.dtsi &vo) sets these; deleting the
+	 * re-statement is not enough — delete the inherited properties */
+	/delete-property/ pwm-gpio;
+	/delete-property/ power-ct-gpio;
 	status = "okay";
 };
 
-/* mipi dsi for kernel */
+/* mipi dsi for kernel — same badge pad note as &vo above */
 &mipi_tx {
 	compatible = "cvitek,mipi_tx";
 	reset-gpio = <&porte 2 GPIO_ACTIVE_LOW>;
-	pwm-gpio = <&porte 0 GPIO_ACTIVE_HIGH>;
-	power-ct-gpio = <&porte 1 GPIO_ACTIVE_HIGH>;
+	/delete-property/ pwm-gpio;
+	/delete-property/ power-ct-gpio;
 	status = "okay";
 };
 
