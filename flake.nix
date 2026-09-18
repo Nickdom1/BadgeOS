@@ -70,7 +70,11 @@
       ];
 
       mkDuoS =
-        { core, buildPlatform }:
+        {
+          core,
+          buildPlatform,
+          pinstripe ? false,
+        }:
         nixpkgs-2605.lib.nixosSystem {
           modules = [
             {
@@ -87,7 +91,8 @@
             ./modules/duo-s/bootswap.nix
             ./modules/duo-s/deploy.nix
             ./modules/duo-s/core-${core}.nix
-          ];
+          ]
+          ++ duosLib.optional pinstripe ./modules/duo-s/mainline-pinstripe.nix;
         };
 
       # All sensible (core, buildPlatform) pairs for one core. We keep the
@@ -173,7 +178,13 @@
         versionTemplate = "2.0-<lastModifiedDate>-<rev>";
 
         # badgeOS NixOS systems (built against nixpkgs 26.05).
-        nixosConfigurations = duosNixosConfigurations;
+        nixosConfigurations = duosNixosConfigurations // {
+          duo-s-riscv-pinstripe-x86_64 = mkDuoS {
+            core = "riscv";
+            buildPlatform = "x86_64-linux";
+            pinstripe = true;
+          };
+        };
 
         # deploy-rs: two nodes, one per core, both reaching the same badge (only
         # one core is booted at a time). Deploy the node matching the CURRENTLY
@@ -317,9 +328,40 @@
             bling-screens = import ./pkgs/badge/bling-content/screens-install.nix {
               pkgs = pkgs.buildPackages;
             };
+          }
+          // {
+            sophgo-disp-test = import ./pkgs/video/sophgo-dsi/test-disp.nix {
+              pkgs = nixpkgs-2605.legacyPackages.${system};
+            };
+            lt8912b-test = import ./pkgs/kernel/lt8912b/test.nix {
+              pkgs = nixpkgs-2605.legacyPackages.${system};
+              kernel = nixpkgs-2605.legacyPackages.${system}.linux_latest;
+            };
+            cv18xx-pll-test = import ./pkgs/kernel/cv18xx-pll/test.nix {
+              pkgs = nixpkgs-2605.legacyPackages.${system};
+              kernel = nixpkgs-2605.legacyPackages.${system}.linux_latest;
+            };
+            display-dtb-test = import ./pkgs/firmware/test-riscv-pinstripe.nix {
+              pkgs = nixpkgs-2605.legacyPackages.${system};
+              kernel = nixpkgs-2605.legacyPackages.${system}.linux_latest;
+            };
           };
 
           devShells = {
+            display = nixpkgs-2605.legacyPackages.${system}.mkShellNoCC {
+              packages = with nixpkgs-2605.legacyPackages.${system}; [
+                (python3.withPackages (ps: [
+                  ps.numpy
+                  ps.pillow
+                ]))
+                ffmpeg
+                dtc
+                xxd
+                bash
+                coreutils
+                openssh
+              ];
+            };
             v1 = pkgs.nixbadge-v1.shell;
             # `nix develop` -> the deploy shell: deploy-rs (the native dev-host binary) on
             # PATH so you can `deploy .#nixbadge-duos-arm --hostname <ip> --ssh-user badge`
