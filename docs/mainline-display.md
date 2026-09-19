@@ -47,12 +47,67 @@ The job does not build a full kernel/image or access hardware; green checks
 establish these software contracts, not display acceptance. All tests remain
 runnable with the commands above independently of adopting the workflow.
 
-`nixosConfigurations.duo-s-riscv-pinstripe-x86_64` declares the complete image
-configuration. Building its `config.system.build.toplevel` requires a separate
-full-kernel build budget; it has been evaluated, not built. Diagnostics are
-enabled at module load, but the display never starts automatically.
+### Fresh checkout: configured kernel and driver
 
-For the existing test installation, this adapter builds only the two modules:
+Use an x86_64 Linux builder with Nix flakes enabled:
+
+```sh
+git clone --single-branch --branch sg2000-display-bringup https://github.com/Nickdom1/BadgeOS.git BadgeOS-display
+cd BadgeOS-display
+git rev-parse HEAD
+```
+
+Record that revision and keep `flake.lock` unchanged. The lock pins Nixpkgs,
+including the `linux_latest` version and
+cross-toolchain; [the selected configuration](../modules/duo-s/mainline-pinstripe.nix)
+adds the board's kernel settings and patches. No separate kernel choice or
+handwritten `.config` is needed.
+
+Inspect the identities and build plan first; these commands do not compile:
+
+```sh
+display_config=.#nixosConfigurations.duo-s-riscv-pinstripe-x86_64.config
+nix eval --option allow-import-from-derivation false --json "$display_config" --apply \
+  'c: { kernel = c.boot.kernelPackages.kernel.drvPath; driver = c.system.build.pinstripeDriver.drvPath; }'
+nix build --option allow-import-from-derivation false --dry-run \
+  "$display_config.boot.kernelPackages.kernel" \
+  "$display_config.boot.kernelPackages.kernel.dev" \
+  "$display_config.boot.kernelPackages.kernel.modules" \
+  "$display_config.system.build.pinstripeDriver"
+```
+
+The following commands **can build the full kernel**. Run them only on a
+builder with an agreed memory, disk and time budget. The three kernel outputs
+come from one derivation; selecting `dev` and `modules` does not compile three
+kernels. In the same shell:
+
+```sh
+nix build --cores 14 --max-jobs 1 --out-link result-kernel \
+  "$display_config.boot.kernelPackages.kernel"
+nix build --cores 14 --max-jobs 1 --out-link result-kernel-dev \
+  "$display_config.boot.kernelPackages.kernel.dev"
+nix build --cores 14 --max-jobs 1 --out-link result-kernel-modules \
+  "$display_config.boot.kernelPackages.kernel.modules"
+nix build --cores 14 --max-jobs 1 --out-link result-display-driver \
+  "$display_config.system.build.pinstripeDriver"
+```
+
+`result-kernel` supplies the kernel image, `result-kernel-dev` its configured
+headers and `Module.symvers`, and `result-kernel-modules` its in-tree modules,
+including the patched LT8912B bridge. `result-display-driver` contains the
+out-of-tree `sophgo-dsi.ko`, built against that same kernel's development output.
+Keep these artifacts together; the version string alone does not establish
+compatibility with an already installed kernel. This route needs no historical
+cache. It builds components, not a bootable SD image or an installation.
+
+The complete NixOS system target is `$display_config.system.build.toplevel`,
+which requires additional builds. It has been evaluated, not built or tested
+as a complete public image. Diagnostics are enabled at module load, but the
+display never starts automatically. See [verification limits](#verification-limits).
+
+### Existing installation: faster cached-module build
+
+For the tested installation, this adapter builds only the two replacement modules:
 
 ```sh
 nix-build pkgs/display/cached-modules.nix --argstr source "$(pwd)" \
@@ -65,7 +120,28 @@ It requires the historical kernel development output declared in the recipe.
 An alternative `--argstr kernelDev /nix/store/...` must match its `.config`,
 `Module.symvers` and bridge-header hashes. Missing or mismatched cache inputs
 are refused; this command cannot provision a new system. Modules compile with
-`W=1 KCFLAGS=-Werror`. Native tests cover calculations and lifecycle failures
+`W=1 KCFLAGS=-Werror`. Do not pass a fresh kernel's development output here
+unless it satisfies those existing compatibility checks; use the configuration's
+`system.build.pinstripeDriver` target for a fresh build instead.
+
+### Verification limits
+
+The September 18 badge trial used newly built public modules against an existing
+kernel. Evaluation on September 19 compared its recorded derivation with the
+public configuration:
+
+| Kernel | Derivation basename in `/nix/store` |
+| --- | --- |
+| Tested installation | `p97dyh7bc163klq65vqc3bqgzvdlwcgn-linux-riscv64-unknown-linux-gnu-7.2.2.drv` |
+| Public source build | `70y5jr4895z0pgpg1mh37cmcagg4cn1v-linux-riscv64-unknown-linux-gnu-7.2.2.drv` |
+
+Toolchain and configuration-generation settings match; consolidated clock/bridge
+patch files and their ordering change the derivation and output paths. Earlier
+source checks found identical patched clock/bridge implementations. This does
+not prove identical rebuilt kernel binaries or symbol hashes. The fresh-build
+targets were evaluated and dry-run, not compiled or tested on the badge.
+The successful cached-module build and warm trial do not establish fresh-image
+acceptance. Native tests cover calculations and lifecycle failures
 using mocks; they cannot establish electrical behavior.
 
 For device discovery and a known-source dongle check, see the

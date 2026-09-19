@@ -55,9 +55,12 @@ cleanly before the commanded-payload experiment. These changes are unresolved.
 
 ## Public candidate trial
 
-The public modules were tested once on September 18. Their driver, kernel,
-DT and build inputs match commit `70edbaaa9d274648233cd47942df9ffd206feb60`;
-later commits change observation tools and documentation only. All 13 settled
+The public modules were tested once on September 18 against the existing kernel
+identified by the cached-module recipe. Module sources, DT and that recipe
+match commit `70edbaaa9d274648233cd47942df9ffd206feb60`; later commits change
+observation tools and documentation only. The public configuration's full kernel
+was not rebuilt for this trial; [the build guide](mainline-display.md#verification-limits)
+records its different derivation and the verification boundary. All 13 settled
 samples were pixel-identical to the reference.
 Both startup snapshots had `MAC_EN=4`, `PD=0` and 0/51 D-PHY differences;
 the driver stopped cleanly and remained idle.
