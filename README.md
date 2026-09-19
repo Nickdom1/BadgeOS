@@ -36,3 +36,9 @@ This README is still very TODO, since this is the first release after DEF CON.
   Yes, really, this is not a joke.
 - Connect over serial (115200/8n1)
 - Run `nix-badge` to control the badge once it's booted
+
+## Experimental RISC-V display bring-up
+
+The opt-in [SG2000 mainline display port](docs/mainline-display.md) documents
+the observed HDMI pinstripe, build instructions and remaining payload,
+modesetting and cold-start limitations.
