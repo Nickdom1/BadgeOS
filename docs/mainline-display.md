@@ -40,6 +40,13 @@ nix develop .#display -c python3 tools/display/tests/test_capture_device.py
 nix develop .#display -c python3 tests/test-display-tools.py
 ```
 
+The optional [GitHub workflow](../.github/workflows/display-checks.yml) runs
+these native/DT and observation tests with two cores, one build job and a
+30-minute limit. It retains the tested revision, lockfile hash and results.
+The job does not build a full kernel/image or access hardware; green checks
+establish these software contracts, not display acceptance. All tests remain
+runnable with the commands above independently of adopting the workflow.
+
 `nixosConfigurations.duo-s-riscv-pinstripe-x86_64` declares the complete image
 configuration. Building its `config.system.build.toplevel` requires a separate
 full-kernel build budget; it has been evaluated, not built. Diagnostics are

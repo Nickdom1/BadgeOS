@@ -1,0 +1,71 @@
+name: Display checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: display-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            max-jobs = 1
+            cores = 2
+
+      - name: Record tested source
+        run: |
+          CHECK_RESULTS="$RUNNER_TEMP/display-checks"
+          mkdir -p "$CHECK_RESULTS"
+          git rev-parse HEAD > "$CHECK_RESULTS/revision.txt"
+          sha256sum flake.lock > "$CHECK_RESULTS/flake-lock.sha256"
+          nix --version > "$CHECK_RESULTS/nix-version.txt"
+
+      # Explicit native/DT targets only: no full kernel, image or badge access.
+      - name: Native driver and device-tree contracts
+        run: |
+          CHECK_RESULTS="$RUNNER_TEMP/display-checks"
+          set -euo pipefail
+          nix build --no-write-lock-file --no-link --print-out-paths -L \
+            --cores 2 --max-jobs 1 \
+            .#sophgo-disp-test .#lt8912b-test .#cv18xx-pll-test .#display-dtb-test \
+            2> >(tee "$CHECK_RESULTS/native-build.log" >&2) \
+            | tee "$CHECK_RESULTS/outputs.txt"
+          while IFS= read -r output; do
+            cat "$output/result.txt"
+            cp "$output/result.txt" "$CHECK_RESULTS/$(basename "$output").txt"
+          done < "$CHECK_RESULTS/outputs.txt"
+
+      - name: Capture and observation regressions
+        run: |
+          CHECK_RESULTS="$RUNNER_TEMP/display-checks"
+          set -euo pipefail
+          nix develop --no-write-lock-file --cores 2 --max-jobs 1 .#display -c bash -euo pipefail -c '
+            python3 tools/display/oracle.py selftest
+            python3 tools/display/tests/test_pinstripe_registers.py
+            python3 tools/display/tests/test_capture_timing.py
+            python3 tools/display/tests/test_capture_device.py
+            python3 tests/test-display-tools.py
+          ' 2>&1 | tee "$CHECK_RESULTS/observation-tests.log"
+
+      - name: Retain source identity and test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: display-checks-${{ github.sha }}
+          path: ${{ runner.temp }}/display-checks
+          if-no-files-found: error
+          retention-days: 14
