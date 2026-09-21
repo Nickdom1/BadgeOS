@@ -39,6 +39,5 @@ This README is still very TODO, since this is the first release after DEF CON.
 
 ## Experimental RISC-V display bring-up
 
-The opt-in [SG2000 mainline display port](docs/mainline-display.md) documents
-the observed HDMI pinstripe, build instructions and remaining payload,
-modesetting and cold-start limitations.
+See the [build and smoke-test guide](docs/mainline-display.md). This opt-in
+path produces a warm-boot pinstripe; framebuffer scanout is not implemented.

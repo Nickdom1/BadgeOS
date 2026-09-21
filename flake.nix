@@ -328,40 +328,9 @@
             bling-screens = import ./pkgs/badge/bling-content/screens-install.nix {
               pkgs = pkgs.buildPackages;
             };
-          }
-          // {
-            sophgo-disp-test = import ./pkgs/video/sophgo-dsi/test-disp.nix {
-              pkgs = nixpkgs-2605.legacyPackages.${system};
-            };
-            lt8912b-test = import ./pkgs/kernel/lt8912b/test.nix {
-              pkgs = nixpkgs-2605.legacyPackages.${system};
-              kernel = nixpkgs-2605.legacyPackages.${system}.linux_latest;
-            };
-            cv18xx-pll-test = import ./pkgs/kernel/cv18xx-pll/test.nix {
-              pkgs = nixpkgs-2605.legacyPackages.${system};
-              kernel = nixpkgs-2605.legacyPackages.${system}.linux_latest;
-            };
-            display-dtb-test = import ./pkgs/firmware/test-riscv-pinstripe.nix {
-              pkgs = nixpkgs-2605.legacyPackages.${system};
-              kernel = nixpkgs-2605.legacyPackages.${system}.linux_latest;
-            };
           };
 
           devShells = {
-            display = nixpkgs-2605.legacyPackages.${system}.mkShellNoCC {
-              packages = with nixpkgs-2605.legacyPackages.${system}; [
-                (python3.withPackages (ps: [
-                  ps.numpy
-                  ps.pillow
-                ]))
-                ffmpeg
-                dtc
-                xxd
-                bash
-                coreutils
-                openssh
-              ];
-            };
             v1 = pkgs.nixbadge-v1.shell;
             # `nix develop` -> the deploy shell: deploy-rs (the native dev-host binary) on
             # PATH so you can `deploy .#nixbadge-duos-arm --hostname <ip> --ssh-user badge`

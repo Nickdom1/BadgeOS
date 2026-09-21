@@ -36,7 +36,7 @@ let
     src = kernel.src;
     patches =
       (import ../kernel/patches/armbian/dts-patches.nix)
-      ++ pkgs.lib.optional pinstripe ../kernel/patches/cv18xx-pll.patch;
+      ++ pkgs.lib.optional pinstripe ../kernel/patches/sg2000-display.patch;
   };
 in
 pkgs.stdenvNoCC.mkDerivation {
