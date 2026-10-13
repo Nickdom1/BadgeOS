@@ -30,7 +30,11 @@ let
   patchedSrc = pkgs.applyPatches {
     name = "linux-${kernel.version}-sophgo-dts-patched";
     src = kernel.src;
-    patches = import ../kernel/patches/armbian/dts-patches.nix;
+    # The DSI host node uses clock 162 (CLK_DSI_SYNTH_SRC), which the display
+    # clock patch adds to the cv1800 binding.
+    patches = import ../kernel/patches/armbian/dts-patches.nix ++ [
+      ../kernel/patches/cv18xx-disppll-lock-dsi-source-gate.patch
+    ];
   };
 in
 pkgs.stdenvNoCC.mkDerivation {

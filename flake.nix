@@ -84,6 +84,7 @@
             ./modules/duo-s/bling.nix
             ./modules/duo-s/oled.nix
             ./modules/duo-s/oled-early.nix
+            ./modules/duo-s/hdmi.nix
             ./modules/duo-s/bootswap.nix
             ./modules/duo-s/deploy.nix
             ./modules/duo-s/core-${core}.nix

@@ -56,6 +56,10 @@
  */
 #define PINPOS(row, col)	((((row) - 'A' + 1) << 8) + ((col) - 1))
 
+/* LT8912B control bus pads: pinctrl-sg2000.h BGA IDs, not SG2002 QFN IDs. */
+#define DUOS_IIC2_SCL		PINPOS('J', 13)
+#define DUOS_IIC2_SDA		PINPOS('J', 14)
+
 #define DUOS_UART0_TX		PINPOS('M', 5)
 #define DUOS_UART0_RX		PINPOS('M', 4)
 
@@ -178,6 +182,20 @@
  * CONFIG_PINCTRL_SOPHGO_SG2000 must be enabled in the kernel. */
 &pinctrl {
 	compatible = "sophgo,sg2000-pinctrl";
+
+	/* IIC2 on J13/J14, primary function 0 (pinctrl-sg2000.c), as on ARM.
+	 * VDDIO_RTC, IO_TYPE_1V8_ONLY. Bias and drive stay at their defaults;
+	 * the board has external pull-ups. */
+	iic2_cfg: iic2-cfg {
+		iic2-scl-pins {
+			pinmux = <PINMUX(DUOS_IIC2_SCL, 0)>;
+			power-source = <1800>;
+		};
+		iic2-sda-pins {
+			pinmux = <PINMUX(DUOS_IIC2_SDA, 0)>;
+			power-source = <1800>;
+		};
+	};
 
 	uart0_cfg: uart0-cfg {
 		uart0-pins {

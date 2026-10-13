@@ -296,6 +296,26 @@
             RESET_SIMPLE y
           '';
         }
+        {
+          # DISPPLL lock and the DSI PHY source gate (SG2000 TRM v1.0 pll_g2 tables,
+          # sophgo/sophgo-doc 370d81b). Mainline polls DISPPLL's "updating" bit (2) as
+          # its lock (18) and caches its rate; the rate now reads 0 until locked,
+          # uncached, so the display host can wait for lock. The source gate
+          # (pll_g2_ssc_syn_ctrl bit 1) becomes clock 162, CLK_DSI_SYNTH_SRC. No other
+          # PLL changes.
+          name = "cv18xx-disppll-lock-dsi-source-gate";
+          patch = ../../pkgs/kernel/patches/cv18xx-disppll-lock-dsi-source-gate.patch;
+        }
+        {
+          # LT8912B ordered by the SG2000 DSI host. Mainline powers and programs the
+          # bridge at attach, before the host drives LP-11, and sets the video timing
+          # after HS starts; pre_enable now does all of it between LP-11 and HS. Disable
+          # writes nothing (RESET_N is an RC power-on reset, NixVegas/pcb d97cfc1);
+          # post_disable drops the supplies. Lanes come from DT data-lanes. The host
+          # reads the void callbacks' result from include/drm/bridge/lt8912b.h.
+          name = "lt8912b-lifecycle";
+          patch = ../../pkgs/kernel/patches/lt8912b-lifecycle.patch;
+        }
       ];
 
       # The reset fires through systemd's reboot-safety watchdog. Its request is

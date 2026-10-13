@@ -202,6 +202,29 @@
 		};
 	};
 
+	/* IIC2, the LT8912B control bus: pads PIN_IIC2_SCL/SDA (balls J13/J14,
+	 * module pins 39/40, net I2C_SENSOR1). IIC2 is their primary function, so
+	 * mux 0 (pinctrl-sg2000.c: CV1800_GENERAL_PIN(PIN_IIC2_*)).
+	 *
+	 * power-source = <1800>, not 3300: the pads are IO_TYPE_1V8_ONLY in the
+	 * VDDIO_RTC domain. The sophgo pinctrl keeps one power-cfg per domain and
+	 * returns -EINVAL (unclaiming the whole group) when a later pin in the
+	 * same domain disagrees; every VDDIO_RTC pad in the SG2000 table is
+	 * 1V8-only, so every group muxed there must say 1800.
+	 *
+	 * No bias: I2C is open-drain with external 10 k pull-ups, and the sophgo
+	 * pinctrl rejects bias-disable (-ENOTSUPP), as for the spi3 sck/sdo pins. */
+	iic2_cfg: iic2-cfg {
+		iic2-scl-pins {
+			pinmux = <PINMUX(PIN_IIC2_SCL, 0)>;
+			power-source = <1800>;
+		};
+		iic2-sda-pins {
+			pinmux = <PINMUX(PIN_IIC2_SDA, 0)>;
+			power-source = <1800>;
+		};
+	};
+
 	uart0_cfg: uart0-cfg {
 		uart0-pins {
 			pinmux = <PINMUX(PIN_UART0_TX, 0)>,

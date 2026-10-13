@@ -306,6 +306,7 @@
 / {
 	aliases {
 		i2c1 = &i2c1;
+		i2c2 = &i2c2; /* the LT8912B control bus: 2-0048 on both cores */
 	};
 };
 
@@ -363,6 +364,131 @@
 				 * nix-badge LEVEL-POLLS it (see sysfs.Button.openPolled).
 				 * Naming through line 2 is enough; the rest stay unnamed. */
 				gpio-line-names = "", "", "user-btn";
+			};
+		};
+	};
+};
+
+/*
+ * HDMI output: the SG2000 display block drives the board's LT8912B (U16)
+ * DSI-to-HDMI bridge over two MIPI DSI data lanes. Resource provenance, vendor
+ * osdrv aa542c41: interdrv/vo/chip/cv181x/vo_mipi_tx.c:_init_resources
+ * (clk_disp, clk_dsi), interdrv/vpss/chip/cv181x/vpss_core.c:_init_resources
+ * (sc_top, D-PHY) and interdrv/base/base.c:base_probe (vip_sys). scaler_reg.h
+ * places sc_top, DISP and the DSI MAC in disjoint windows. The clock IDs are
+ * the mainline cv1800 binding names for those vendor clocks.
+ */
+/ {
+	soc {
+		vip_sys: syscon@a0c8000 {
+			compatible = "sophgo,sg2000-vip-sys", "syscon";
+			reg = <0x0a0c8000 0x1000>;
+			/* clk-cv1800.c:clk_cfg_reg_vip gates the register interface
+			 * separately from the AXI VIP children. syscon attaches the clock
+			 * to its regmap, which enables it around every access; the first
+			 * VIP read stalls without it. */
+			clocks = <&clk CLK_CFG_REG_VIP>;
+		};
+
+		sophgo_dsi: dsi@a080000 {
+			compatible = "sophgo,sg2000-dsi";
+			reg = <0x0a080000 0x1000>,
+			      <0x0a088000 0x1000>,
+			      <0x0a08a000 0x1000>,
+			      <0x0a0d1000 0x1000>;
+			reg-names = "sc_top", "disp", "dsi_mac", "dphy";
+			sophgo,vip-sys = <&vip_sys>;
+			/* axi_vip is the VIP AXI master clock the DISP DRAM reader needs.
+			 * The vendor display node never takes it (vendor display DMA
+			 * relies on the vi node's clk_axi), and nothing else holds it on
+			 * mainline, so clk_disable_unused would gate it. bt_vip is an AXI
+			 * gate beside the display gates that the vendor kernel leaves
+			 * running (its mipi_tx node lists it as clk_bt). */
+			clocks = <&clk CLK_SC_TOP_VIP>,
+				 <&clk CLK_DISP_VIP>, <&clk CLK_DSI_MAC_VIP>,
+				 <&clk CLK_DSI_ESC>, <&clk CLK_DISPPLL>,
+				 <&clk CLK_DISP_SRC_VIP>, <&clk CLK_DSI_SYNTH_SRC>,
+				 <&clk CLK_AXI6>, <&clk CLK_CFG_REG_VIP>,
+				 <&clk CLK_AXI_VIP>, <&clk CLK_BT_VIP>;
+			clock-names = "sc_top", "clk_disp", "clk_dsi", "dsi_esc",
+				      "disppll", "disp_src", "dsi_src", "esc_parent",
+				      "cfg_reg", "axi_vip", "bt_vip";
+
+			port {
+				dsi_out: endpoint {
+					data-lanes = <0 1>;
+					remote-endpoint = <&lt8912_in>;
+				};
+			};
+		};
+	};
+
+	/* NixVegas/pcb d97cfc1d2f50a0447eaf80c7d025e58900b8f5e6, kicad/hdmi.kicad_sch
+	 * and nixos.kicad_pcb: +1V8 feeds the LT8912B's VDD (pins 18/33/57) through
+	 * L4, VCCA (5/26/41/50/52) through L3 and VCCA_HDMIPLL (34) through L2, with
+	 * no software enable. RESET_N (pin 64) is an R77/C47 RC to the rail; no CPU
+	 * GPIO resets the bridge. */
+	lt8912_1v8: regulator-lt8912-1v8 {
+		compatible = "regulator-fixed";
+		regulator-name = "lt8912-board-1v8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
+
+	hdmi-connector {
+		compatible = "hdmi-connector";
+		type = "a";
+		/* IIC2 (I2C_SENSOR1, LT8912B pins 61/62) also reaches HDMI pins 15/16
+		 * through FET1/FET2. HPD goes to the LT8912B (pin 14, through Q12),
+		 * not to a CPU GPIO. */
+		ddc-i2c-bus = <&i2c2>;
+
+		port {
+			hdmi_in: endpoint {
+				remote-endpoint = <&lt8912_out>;
+			};
+		};
+	};
+};
+
+/* IIC2, the LT8912B control bus. The board's 10 k pull-ups need 100 kHz;
+ * cv180x.dtsi supplies the DesignWare controller, its clocks and its reset.
+ * iic2_cfg is defined per core, like i2c1_cfg. */
+&i2c2 {
+	status = "okay";
+	clock-frequency = <100000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&iic2_cfg>;
+
+	lt8912: bridge@48 {
+		compatible = "lontium,lt8912b";
+		reg = <0x48>;
+		vdd-supply = <&lt8912_1v8>;
+		vccmipirx-supply = <&lt8912_1v8>;
+		vccsysclk-supply = <&lt8912_1v8>;
+		vcclvdstx-supply = <&lt8912_1v8>;
+		vcchdmitx-supply = <&lt8912_1v8>;
+		vcclvdspll-supply = <&lt8912_1v8>;
+		vcchdmipll-supply = <&lt8912_1v8>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				lt8912_in: endpoint {
+					data-lanes = <0 1>;
+					remote-endpoint = <&dsi_out>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+				lt8912_out: endpoint {
+					remote-endpoint = <&hdmi_in>;
+				};
 			};
 		};
 	};
