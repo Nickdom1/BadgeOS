@@ -397,6 +397,9 @@
 			      <0x0a08a000 0x1000>,
 			      <0x0a0d1000 0x1000>;
 			reg-names = "sc_top", "disp", "dsi_mac", "dphy";
+			assigned-clocks = <&clk CLK_DSI_ESC>;
+			assigned-clock-parents = <&clk CLK_AXI6>;
+			assigned-clock-rates = <20000000>;
 			sophgo,vip-sys = <&vip_sys>;
 			/* axi_vip is the VIP AXI master clock the DISP DRAM reader needs.
 			 * The vendor display node never takes it (vendor display DMA
@@ -408,10 +411,10 @@
 				 <&clk CLK_DISP_VIP>, <&clk CLK_DSI_MAC_VIP>,
 				 <&clk CLK_DSI_ESC>, <&clk CLK_DISPPLL>,
 				 <&clk CLK_DISP_SRC_VIP>, <&clk CLK_DSI_SYNTH_SRC>,
-				 <&clk CLK_AXI6>, <&clk CLK_CFG_REG_VIP>,
+				 <&clk CLK_CFG_REG_VIP>,
 				 <&clk CLK_AXI_VIP>, <&clk CLK_BT_VIP>;
 			clock-names = "sc_top", "clk_disp", "clk_dsi", "dsi_esc",
-				      "disppll", "disp_src", "dsi_src", "esc_parent",
+				      "disppll", "disp_src", "dsi_src",
 				      "cfg_reg", "axi_vip", "bt_vip";
 
 			port {

@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Sophgo SG2000 MIPI DSI host: fixed 1280x720 scanout through an LT8912B.
+ * Sophgo SG2000 MIPI DSI host: fixed 1280x720 scanout through a DSI bridge.
  *
- * It registers a DSI host for the LT8912B bridge driver and, once the bridge
- * attaches, a DRM device whose fixed-mode CRTC scans an fbdev or dumb buffer
- * out of memory through the display block's DRAM reader.
+ * It registers a DSI host and, once a peripheral attaches, a DRM device whose
+ * fixed-mode CRTC scans an fbdev or dumb buffer through the display DRAM reader.
  *
  * Register sequences follow sophgo/osdrv aa542c41df94f7bc656cb740f6622a5dca7dc403
  * (interdrv/vpss/chip/cv181x/{scaler.c,scaler.h,scaler_reg.h,reg_disp.h,dsi_phy.c},
@@ -20,6 +19,7 @@
 #include <linux/irqflags.h>
 #include <linux/ktime.h>
 #include <linux/mfd/syscon.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
@@ -28,11 +28,11 @@
 #include <linux/string.h>
 #include <linux/workqueue.h>
 
-#include <drm/bridge/lt8912b.h>
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
+#include <drm/drm_bridge_connector.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_drv.h>
@@ -161,28 +161,27 @@
  * sclr_ctrl_init raises the fetch FIFO threshold to 0x10201020 "to avoid garbage"; it
  * latches with the reader words.
  */
-#define SOPHGO_RD_ADDR0_L 0x34
-#define SOPHGO_RD_PITCH_Y 0x4c
-#define SOPHGO_RD_IN_CSC0 0x78
-#define SOPHGO_RD_WORDS 11U /* ADDR0..2 L/H, PITCH_Y/C, OFFSET, SIZE, IN_CSC0 */
-#define SOPHGO_RD_FMT_MASK 0xf007U /* fmt_sel [15:12], disp_sel [2:0] = DRAM */
-#define SOPHGO_RD_OS_MAX 0x0f000000U
-#define SOPHGO_RD_BURST 7U /* PITCH_Y[31:28] */
-#define SOPHGO_RD_ALIGN 64ULL
-#define SOPHGO_RD_ADDR_END (1ULL << 40)
-#define SOPHGO_RD_FIFO_THR_REG 0x30
-#define SOPHGO_RD_FIFO_THR 0x10201020U
-#define SOPHGO_RD_FIFO (SOPHGO_RD_WORDS + 6U) /* after the six PAT words */
-#define SOPHGO_RD_LATCH (SOPHGO_RD_WORDS + 7U) /* reader, PAT and FIFO words */
-#define SOPHGO_RD_FMT_BGR 3U /* scaler.h SCL_FMT_BGR_PACKED */
+#define DISP_RD_ADDR0_L 0x34
+#define DISP_RD_PITCH_Y 0x4c
+#define DISP_RD_IN_CSC0 0x78
+#define DISP_RD_WORDS 11U /* ADDR0..2 L/H, PITCH_Y/C, OFFSET, SIZE, IN_CSC0 */
+#define DISP_RD_FMT_MASK 0xf007U /* fmt_sel [15:12], disp_sel [2:0] = DRAM */
+#define DISP_RD_OS_MAX 0x0f000000U
+#define DISP_RD_BURST 7U /* PITCH_Y[31:28] */
+#define DISP_RD_ALIGN 64ULL
+#define DISP_RD_ADDR_END (1ULL << 40)
+#define DISP_RD_FIFO_THR_REG 0x30
+#define DISP_RD_FIFO_THR 0x10201020U
+#define DISP_RD_FIFO (DISP_RD_WORDS + 6U) /* after the six PAT words */
+#define DISP_RD_LATCH (DISP_RD_WORDS + 7U) /* reader, PAT and FIFO words */
+#define DISP_RD_FMT_BGR 3U /* scaler.h SCL_FMT_BGR_PACKED */
 #define SOPHGO_SO_WIDTH 1280U
 #define SOPHGO_SO_HEIGHT 720U
 #define SOPHGO_SO_PITCH_MAX 0xffffU
 
-#define SOPHGO_FETCH_TRIES 3U
 #define SOPHGO_FETCH_WAIT_NS 100000000ULL /* frame-end wait, about six frames */
 #define SOPHGO_FETCH_HOLD_NS 2000000ULL /* idle run proving a cut, about 90 lines */
-#define SOPHGO_FETCH_SETTLE_NS 25000000ULL /* one frame and margin */
+#define SOPHGO_FETCH_SETTLE_NS 25000000ULL /* one frame and margin, per cut */
 
 enum sophgo_clock {
 	SOPHGO_CLK_SC_TOP,
@@ -200,7 +199,7 @@ enum sophgo_clock {
 enum sophgo_kms_state { SOPHGO_KMS_OFF, SOPHGO_KMS_REGISTERED, SOPHGO_KMS_DONE };
 
 struct sophgo_reader_plan {
-	unsigned int word[SOPHGO_RD_WORDS];
+	u32 word[DISP_RD_WORDS];
 	struct drm_gem_object *gem; /* the object the address points into */
 };
 
@@ -215,17 +214,13 @@ struct sophgo_dsi {
 	void __iomem *top, *disp, *mac, *phy;
 	struct regmap *vip;
 	struct clk_bulk_data clocks[SOPHGO_CLK_COUNT];
-	struct clk *bt, *esc_parent;
-	struct mutex lock; /* attach, detach, shutdown and the CRTC */
-	struct lt8912b_pipeline status; /* the bridge's report on a start or stop */
-	bool pll_held, source_held, esc_held; /* ownership: see sophgo_prepare() */
-	bool clocks_on, bt_on, esc_set, div_set, phy_on, mmio_ready;
-	struct clk *esc_old_parent;
-	unsigned long esc_old_rate, pll_hz;
-	unsigned int div_old;
-	bool latch_failed;
+	struct clk *bt;
+	struct mutex lock; /* serializes device and DRM callbacks */
+	int error; /* suppresses HS after a failed host start */
+	bool clocks_on, div_set, phy_on, mmio_ready;
+	u32 div_old;
 	struct clk *reader_axi;
-	bool reader_axi_on, reader_applied;
+	bool reader_axi_on, flips_ok; /* a latched start with no failed latch since */
 	struct work_struct kms_work;
 	enum sophgo_kms_state kms_state;
 	struct sophgo_reader_plan plan; /* the framebuffer last enabled or flipped to */
@@ -233,18 +228,11 @@ struct sophgo_dsi {
 	struct drm_gem_object *held[2]; /* objects the reader may still fetch from */
 };
 
-/*
- * The connector routes through a placeholder encoder and the bridge stays on the host
- * encoder, because the CRTC enable and disable sequence the bridge themselves: a failed
- * bridge or MAC step must end a start and a failed stop must keep its resources, which
- * the void atomic bridge callbacks cannot express. No vblank is initialised, so the
- * atomic helpers fake every vblank event.
- */
+/* No vblank is initialised, so the atomic helpers fake every vblank event. */
 struct sophgo_kms {
 	struct drm_plane plane;
 	struct drm_crtc crtc;
-	struct drm_encoder encoder;
-	struct drm_connector connector;
+	struct drm_connector_helper_funcs connector_helpers;
 };
 
 /* CEA-861 1280x720@60 (VIC 4), the one mode; the register words above derive from it. */
@@ -293,24 +281,9 @@ static void sophgo_disp_shadow_begin(void __iomem *disp)
 	sophgo_disp_cfg_rmw(disp, DISP_CFG_SHADOW_MASK, DISP_CFG_SHADOW_MASK);
 }
 
-static bool sophgo_rate_near(unsigned long got, unsigned long want)
-{
-	unsigned long delta = got > want ? got - want : want - got;
-
-	return got && want && delta <= want / 1000000;
-}
-
 static bool sophgo_owned(struct sophgo_dsi *dsi)
 {
-	return dsi->pll_held || dsi->source_held || dsi->esc_held || dsi->clocks_on ||
-	       dsi->bt_on || dsi->esc_set || dsi->div_set || dsi->phy_on || dsi->mmio_ready;
-}
-
-/* The first error of a start sticks until the next start clears the status. */
-static void sophgo_fail(struct sophgo_dsi *dsi, int ret)
-{
-	if (ret && !dsi->status.error)
-		dsi->status.error = ret;
+	return dsi->clocks_on || dsi->div_set || dsi->phy_on || dsi->mmio_ready;
 }
 
 /* MAC_EN is read-write-set (scaler.c:sclr_dsi_clr_mode): writing the mode back clears it. */
@@ -323,18 +296,6 @@ static int sophgo_mac_quiesce(struct sophgo_dsi *dsi)
 	if (val & MAC_MODE_VIDEO)
 		writel(val, dsi->mac + MAC_EN);
 	return read_poll_timeout(readl, val, !(val & 0xf), 1000, 20000, false, dsi->mac + MAC_EN);
-}
-
-static int sophgo_mac_configure(struct sophgo_dsi *dsi)
-{
-	int ret = sophgo_mac_quiesce(dsi);
-
-	if (ret)
-		return ret;
-	sophgo_rmw(dsi->mac + MAC_HS0, MAC_HS0_MASK, MAC_HS0_720P);
-	sophgo_rmw(dsi->mac + MAC_HS1, MAC_HS1_MASK, MAC_HS1_720P);
-	readl(dsi->mac + MAC_HS1);
-	return 0;
 }
 
 /* vo_mipi_tx.c:mipi_tx_enable does not poll: a missing acknowledgment is only reported. */
@@ -396,16 +357,6 @@ static void sophgo_dphy_program(struct sophgo_dsi *dsi)
 	/* scaler.c:sclr_disp_set_intf(MIPI): the parallel VO output is off. */
 	sophgo_rmw(dsi->top + SC_TOP_VO_MUX, 0xf, 0);
 	readl(dsi->top + SC_TOP_VO_MUX);
-}
-
-/* scaler.c:sclr_disp_set_intf(DISABLE) -> dsi_phy.c:dphy_init. */
-static void sophgo_dphy_power_down(void __iomem *phy)
-{
-	sophgo_rmw(phy + DPHY_EN, 0x3f, 0);
-	sophgo_rmw(phy + DPHY_MAP, 0xfffff, 0);
-	sophgo_rmw(phy + 0x44, 0x1f1f1f1f, 0);
-	sophgo_rmw(phy + 0x64, 0x1f1f, 0x1f1f);
-	readl(phy + 0x64);
 }
 
 /*
@@ -478,7 +429,7 @@ static void sophgo_disp_shadow_end(void __iomem *disp)
 	readl(disp + DISP_CFG);
 }
 
-static void sophgo_pat_read(void __iomem *disp, unsigned int words[6])
+static void sophgo_pat_read(void __iomem *disp, u32 words[6])
 {
 	unsigned int i;
 
@@ -486,36 +437,36 @@ static void sophgo_pat_read(void __iomem *disp, unsigned int words[6])
 		words[i] = readl(disp + DISP_PAT_CFG + i * 4);
 }
 
-static void sophgo_reader_observe(void __iomem *disp, unsigned int *words)
+static void sophgo_reader_observe(void __iomem *disp, u32 *words)
 {
 	unsigned int i;
 
 	for (i = 0; i < 10; i++)
-		words[i] = readl(disp + SOPHGO_RD_ADDR0_L + i * 4);
-	words[10] = readl(disp + SOPHGO_RD_IN_CSC0);
-	sophgo_pat_read(disp, words + SOPHGO_RD_WORDS);
-	words[SOPHGO_RD_FIFO] = readl(disp + SOPHGO_RD_FIFO_THR_REG);
+		words[i] = readl(disp + DISP_RD_ADDR0_L + i * 4);
+	words[10] = readl(disp + DISP_RD_IN_CSC0);
+	sophgo_pat_read(disp, words + DISP_RD_WORDS);
+	words[DISP_RD_FIFO] = readl(disp + DISP_RD_FIFO_THR_REG);
 }
 
 static void sophgo_reader_apply(void __iomem *disp, const struct sophgo_reader_plan *p,
-				unsigned int expected[SOPHGO_RD_LATCH])
+				u32 expected[DISP_RD_LATCH])
 {
 	unsigned int i;
 
 	memcpy(expected, p->word, sizeof(p->word));
-	expected[6] |= readl(disp + SOPHGO_RD_PITCH_Y) & SOPHGO_RD_OS_MAX;
-	sophgo_pat_read(disp, expected + SOPHGO_RD_WORDS);
-	expected[SOPHGO_RD_WORDS] &= ~(DISP_PAT_OFF_MASK | DISP_PAT_WINDOW_BG);
-	expected[SOPHGO_RD_FIFO] = SOPHGO_RD_FIFO_THR;
+	expected[6] |= readl(disp + DISP_RD_PITCH_Y) & DISP_RD_OS_MAX;
+	sophgo_pat_read(disp, expected + DISP_RD_WORDS);
+	expected[DISP_RD_WORDS] &= ~(DISP_PAT_OFF_MASK | DISP_PAT_WINDOW_BG);
+	expected[DISP_RD_FIFO] = DISP_RD_FIFO_THR;
 	sophgo_disp_shadow_begin(disp);
-	sophgo_disp_cfg_rmw(disp, SOPHGO_RD_FMT_MASK, SOPHGO_RD_FMT_BGR << 12);
+	sophgo_disp_cfg_rmw(disp, DISP_RD_FMT_MASK, DISP_RD_FMT_BGR << 12);
 	for (i = 0; i < 10; i++)
-		writel(expected[i], disp + SOPHGO_RD_ADDR0_L + i * 4);
-	writel(expected[10], disp + SOPHGO_RD_IN_CSC0);
-	writel(expected[SOPHGO_RD_FIFO], disp + SOPHGO_RD_FIFO_THR_REG);
+		writel(expected[i], disp + DISP_RD_ADDR0_L + i * 4);
+	writel(expected[10], disp + DISP_RD_IN_CSC0);
+	writel(expected[DISP_RD_FIFO], disp + DISP_RD_FIFO_THR_REG);
 	for (i = 1; i < 6; i++)
-		writel(expected[SOPHGO_RD_WORDS + i], disp + DISP_PAT_CFG + i * 4);
-	writel(expected[SOPHGO_RD_WORDS], disp + DISP_PAT_CFG);
+		writel(expected[DISP_RD_WORDS + i], disp + DISP_PAT_CFG + i * 4);
+	writel(expected[DISP_RD_WORDS], disp + DISP_PAT_CFG);
 	sophgo_disp_shadow_end(disp);
 }
 
@@ -532,52 +483,40 @@ static int sophgo_plan(const struct drm_plane_state *ps, struct sophgo_reader_pl
 		bytes = obj->base.size - fb->offsets[0];
 	}
 	*p = (struct sophgo_reader_plan) { .gem = obj ? &obj->base : NULL };
-	p->word[0] = (unsigned int)dma;
-	p->word[1] = (unsigned int)(dma >> 32);
-	p->word[6] = SOPHGO_RD_BURST << 28 | pitch;
+	p->word[0] = (u32)dma;
+	p->word[1] = (u32)(dma >> 32);
+	p->word[6] = DISP_RD_BURST << 28 | pitch;
 	p->word[9] = (SOPHGO_SO_HEIGHT - 1U) << 16 | (SOPHGO_SO_WIDTH - 1U);
 	if (!fb || ((ps->src_x | ps->src_y | ps->src_w | ps->src_h) & 0xffff) || ps->src_x ||
 	    ps->src_y || ps->src_w != SOPHGO_SO_WIDTH << 16 || ps->src_h != SOPHGO_SO_HEIGHT << 16)
 		return -EINVAL;
-	if (pitch < SOPHGO_SO_WIDTH * 3U || pitch % SOPHGO_RD_ALIGN || pitch > SOPHGO_SO_PITCH_MAX)
+	if (pitch < SOPHGO_SO_WIDTH * 3U || pitch % DISP_RD_ALIGN || pitch > SOPHGO_SO_PITCH_MAX)
 		return -ERANGE;
 	need = (unsigned long long)pitch * (SOPHGO_SO_HEIGHT - 1U) + SOPHGO_SO_WIDTH * 3U;
 	if (bytes < need)
 		return -ENOSPC;
-	if (!dma || dma % SOPHGO_RD_ALIGN || dma >= SOPHGO_RD_ADDR_END ||
-	    SOPHGO_RD_ADDR_END - dma < need)
+	if (!dma || dma % DISP_RD_ALIGN || dma >= DISP_RD_ADDR_END ||
+	    DISP_RD_ADDR_END - dma < need)
 		return -EFAULT;
 	return 0;
 }
 
-static void sophgo_flip_apply(void __iomem *disp, const struct sophgo_reader_plan *p,
-			      unsigned int expected[SOPHGO_RD_LATCH])
+static bool sophgo_reader_latched(void __iomem *disp, const u32 *expected)
 {
-	sophgo_reader_observe(disp, expected);
-	expected[0] = p->word[0];
-	expected[1] = p->word[1];
-	sophgo_disp_shadow_begin(disp);
-	writel(expected[0], disp + SOPHGO_RD_ADDR0_L);
-	writel(expected[1], disp + SOPHGO_RD_ADDR0_L + 4);
-	sophgo_disp_shadow_end(disp);
-}
-
-static bool sophgo_reader_latched(void __iomem *disp, const unsigned int *expected)
-{
-	unsigned int observed[SOPHGO_RD_LATCH];
+	u32 observed[DISP_RD_LATCH];
 
 	sophgo_reader_observe(disp, observed);
 	return !memcmp(observed, expected, sizeof(observed));
 }
 
-static int sophgo_reader_latch(struct sophgo_dsi *dsi, const unsigned int expected[SOPHGO_RD_LATCH])
+static int sophgo_reader_latch(struct sophgo_dsi *dsi, const u32 expected[DISP_RD_LATCH])
 {
 	bool latched;
 	int ret = read_poll_timeout(sophgo_reader_latched, latched, latched, 1000, 100000, true,
 				    dsi->disp, expected);
 
 	if (ret)
-		dsi->latch_failed = true;
+		dsi->flips_ok = false;
 	return ret;
 }
 
@@ -613,11 +552,10 @@ static void sophgo_reader_drop(struct sophgo_dsi *dsi, struct drm_gem_object *ke
 /* The AXI clock is on before any address reaches the reader, until sophgo_reader_release(). */
 static int sophgo_reader_start(struct sophgo_dsi *dsi)
 {
-	unsigned int expected[SOPHGO_RD_LATCH];
+	u32 expected[DISP_RD_LATCH];
 	int ret;
 
-	dsi->latch_failed = false;
-	dsi->reader_applied = false;
+	dsi->flips_ok = false;
 	if (dsi->plan_refused)
 		return dsi->plan_refused;
 	if (!sophgo_reader_hold(dsi, dsi->plan.gem))
@@ -639,13 +577,13 @@ static int sophgo_reader_start(struct sophgo_dsi *dsi)
 	ret = sophgo_reader_latch(dsi, expected);
 	if (ret)
 		return ret;
-	dsi->reader_applied = true;
+	dsi->flips_ok = true;
 	return 0;
 }
 
 static void sophgo_reader_release(struct sophgo_dsi *dsi)
 {
-	dsi->reader_applied = false;
+	dsi->flips_ok = false;
 	if (dsi->reader_axi_on) {
 		clk_disable_unprepare(dsi->reader_axi);
 		dsi->reader_axi_on = false;
@@ -654,40 +592,13 @@ static void sophgo_reader_release(struct sophgo_dsi *dsi)
 }
 
 /*
- * Fetch stop. The DRAM reader is idle (DISP_AXI_ST bit 0) only between frames while TGEN
- * runs; TGEN stopped mid-fetch leaves it busy until TGEN runs again. vo.c:vo_stop_streaming
- * first turns the scaler-top disp_enable off, without which AXI_IDLE never returns once
- * TGEN stops, then TGEN with sclr_disp_tgen_enable(false), a bare read-modify-write of
- * DISP_CFG bit 7. So does this stop, after the MAC stop and the bridge disable: a cut
- * samples AXI_ST and clears TGEN in the same interrupts-off section as the first idle
- * sample, inside that frame end's blank, then needs TGEN off and the reader idle for 2 ms
- * within 25 ms. A reader left busy gets TGEN back on with the same write, as the vendor
- * does around timing changes, drains to a frame end and is cut again, three cuts at most;
- * every path leaves TGEN off. The quiesce then gates every release: a reader still busy
- * keeps every resource and held buffer, and the stop fails for a retry.
+ * vo.c:vo_stop_streaming turns the scaler-top input off before TGEN. Clear TGEN
+ * in the AXI-idle window with interrupts off, then require 2 ms of continuous idle
+ * within 25 ms of the cut; a busy sample restarts the idle run. A cut that does not
+ * settle gets TGEN back and another frame end, three cuts at most within 100 ms.
+ * Every exit leaves TGEN off; the later quiesce keeps clocks and GEM references
+ * if the reader remains busy.
  */
-static void sophgo_fetch_cut(void __iomem *disp)
-{
-	u64 start = ktime_get_ns();
-	unsigned long flags;
-	bool idle, last;
-
-	for (;;) {
-		last = ktime_get_ns() - start >= SOPHGO_FETCH_WAIT_NS;
-		local_irq_save(flags);
-		idle = readl(disp + DISP_AXI_ST) & DISP_AXI_IDLE;
-		if (idle || last) {
-			sophgo_disp_cfg_rmw(disp, DISP_CFG_TGEN, 0);
-			/* Post the TGEN-off write before interrupts return. */
-			readl(disp + DISP_CFG);
-		}
-		local_irq_restore(flags);
-		if (idle || last)
-			return;
-		usleep_range(10, 20);
-	}
-}
-
 static bool sophgo_reader_idle(void __iomem *disp)
 {
 	u32 cfg = readl(disp + DISP_CFG), axi = readl(disp + DISP_AXI_ST);
@@ -695,40 +606,48 @@ static bool sophgo_reader_idle(void __iomem *disp)
 	return !(cfg & DISP_CFG_TGEN) && (axi & DISP_AXI_IDLE);
 }
 
-static bool sophgo_fetch_settled(void __iomem *disp)
-{
-	u64 start = ktime_get_ns(), since = 0, now;
-	bool run = false, idle;
-
-	for (;;) {
-		idle = sophgo_reader_idle(disp);
-		now = ktime_get_ns();
-		if (!idle) {
-			run = false;
-		} else if (!run) {
-			run = true;
-			since = now;
-		} else if (now - since >= SOPHGO_FETCH_HOLD_NS) {
-			return true;
-		}
-		if (now - start >= SOPHGO_FETCH_SETTLE_NS)
-			return false;
-		usleep_range(50, 100);
-	}
-}
-
 static void sophgo_fetch_stop(void __iomem *disp)
 {
+	u64 deadline = ktime_get_ns() + SOPHGO_FETCH_WAIT_NS, settle, since, now;
+	unsigned long flags;
 	unsigned int attempt;
+	bool idle, last;
 
 	if (!(readl(disp + DISP_CFG) & DISP_CFG_TGEN) &&
 	    (readl(disp + DISP_AXI_ST) & DISP_AXI_IDLE))
 		return;
-	for (attempt = 0; attempt < SOPHGO_FETCH_TRIES; attempt++) {
+	for (attempt = 0; attempt < 3; attempt++) {
 		if (!(readl(disp + DISP_CFG) & DISP_CFG_TGEN))
 			sophgo_disp_cfg_rmw(disp, DISP_CFG_TGEN, DISP_CFG_TGEN);
-		sophgo_fetch_cut(disp);
-		if (sophgo_fetch_settled(disp))
+		for (;;) {
+			last = ktime_get_ns() >= deadline;
+			local_irq_save(flags);
+			idle = readl(disp + DISP_AXI_ST) & DISP_AXI_IDLE;
+			if (idle || last) {
+				sophgo_disp_cfg_rmw(disp, DISP_CFG_TGEN, 0);
+				readl(disp + DISP_CFG);
+			}
+			local_irq_restore(flags);
+			if (idle || last)
+				break;
+			usleep_range(10, 20);
+		}
+		since = 0;
+		settle = min(ktime_get_ns() + SOPHGO_FETCH_SETTLE_NS, deadline);
+		for (;;) {
+			idle = sophgo_reader_idle(disp);
+			now = ktime_get_ns();
+			if (!idle)
+				since = 0;
+			else if (!since)
+				since = now;
+			else if (now - since >= SOPHGO_FETCH_HOLD_NS)
+				return;
+			if (now >= settle)
+				break;
+			usleep_range(50, 100);
+		}
+		if (now >= deadline)
 			return;
 	}
 }
@@ -753,64 +672,42 @@ static int sophgo_reader_quiesce(struct sophgo_dsi *dsi)
 	return read_poll_timeout(sophgo_reader_idle, idle, idle, 1000, 100000, false, dsi->disp);
 }
 
-/* DISPPLL reads zero until it locks, so a nonzero rate is the lock; escape within 1 ppm. */
-static int sophgo_clocks_ready(struct sophgo_dsi *dsi)
-{
-	struct clk *esc = dsi->clocks[SOPHGO_CLK_DSI_ESC].clk;
-	unsigned long rate;
-	int ret;
-
-	ret = read_poll_timeout(clk_get_rate, rate, sophgo_rate_near(rate, dsi->pll_hz), 100,
-				200000, false, dsi->clocks[SOPHGO_CLK_DISPPLL].clk);
-	if (ret)
-		return ret;
-	if (clk_get_rate(dsi->clocks[SOPHGO_CLK_DSI_SRC].clk) != SOPHGO_DSI_SRC_HZ ||
-	    !sophgo_rate_near(clk_get_rate(esc), SOPHGO_ESC_HZ) ||
-	    !clk_is_match(clk_get_parent(esc), dsi->esc_parent))
-		return -ERANGE;
-	return 0;
-}
-
 /*
- * Start and stop. The start follows vo_mipi_tx.c: display clocks before the DSI ones and
- * no local reset (asserted display resets are refused), then LP-11 pads, TGEN running and
- * the MAC idle before the bridge's pre_enable, and the HS request before its video enable;
- * the bridge's void callbacks report through the shared status. Each acquired resource
- * sets an ownership flag, and mmio_ready qualifies direct MMIO. The stop runs from any
- * partial state and lets the reader's AXI clock go last. A step that cannot complete (a
- * quiesce timeout, a failed restore, rails the bridge still owns) keeps what it holds and
- * fails the stop: the pipeline stays owned, enables return -EBUSY, and detach or shutdown
- * retries it.
+ * vo_mipi_tx.c order: display clocks before DSI, no local reset, LP-11 and TGEN
+ * before bridge pre_enable, then the encoder requests HS before bridge enable.
+ * The reader's AXI clock is released last, after the reader is idle.
  */
 static int sophgo_prepare(struct sophgo_dsi *dsi)
 {
 	struct clk *esc = dsi->clocks[SOPHGO_CLK_DSI_ESC].clk;
-	unsigned int val;
-	long rounded;
+	u32 val;
+	unsigned long rate;
 	int ret;
 
 	/* Rate holds keep other consumers off the shared PLL and source rates. */
 	ret = clk_rate_exclusive_get(dsi->clocks[SOPHGO_CLK_DISPPLL].clk);
 	if (ret)
 		return ret;
-	dsi->pll_held = true;
 	ret = clk_rate_exclusive_get(dsi->clocks[SOPHGO_CLK_DSI_SRC].clk);
 	if (ret)
-		return ret;
-	dsi->source_held = true;
+		goto put_pll;
+	ret = clk_rate_exclusive_get(esc);
+	if (ret)
+		goto put_source;
 	ret = clk_bulk_prepare_enable(SOPHGO_CLK_COUNT, dsi->clocks);
 	if (ret)
-		return ret;
-	dsi->clocks_on = true;
+		goto put_esc;
 	ret = clk_prepare_enable(dsi->bt);
 	if (ret)
-		return ret;
-	dsi->bt_on = true;
-	ret = read_poll_timeout(clk_get_rate, dsi->pll_hz, dsi->pll_hz, 100, 200000, false,
+		goto disable_clocks;
+	dsi->clocks_on = true;
+	/* DISPPLL reads zero until locked; DT assigns the held escape clock to 20 MHz. */
+	ret = read_poll_timeout(clk_get_rate, rate, rate, 100, 200000, false,
 				dsi->clocks[SOPHGO_CLK_DISPPLL].clk);
 	if (ret)
 		return ret;
-	if (clk_get_rate(dsi->clocks[SOPHGO_CLK_DSI_SRC].clk) != SOPHGO_DSI_SRC_HZ)
+	if (clk_get_rate(dsi->clocks[SOPHGO_CLK_DSI_SRC].clk) != SOPHGO_DSI_SRC_HZ ||
+	    clk_get_rate(esc) != SOPHGO_ESC_HZ)
 		return -ERANGE;
 	ret = regmap_read(dsi->vip, VIP_RESET, &val);
 	if (ret)
@@ -825,30 +722,6 @@ static int sophgo_prepare(struct sophgo_dsi *dsi)
 
 	/* Stop a timing generator the firmware left running. */
 	sophgo_display_stop(dsi);
-
-	ret = clk_rate_exclusive_get(esc);
-	if (ret)
-		return ret;
-	dsi->esc_held = true;
-	dsi->esc_old_parent = clk_get_parent(esc);
-	dsi->esc_old_rate = clk_get_rate(esc);
-	if (!dsi->esc_old_parent || !dsi->esc_old_rate)
-		return -ERANGE;
-	dsi->esc_set = true;
-	ret = clk_set_parent(esc, dsi->esc_parent);
-	if (ret)
-		return ret;
-	rounded = clk_round_rate(esc, SOPHGO_ESC_HZ);
-	if (rounded < 0)
-		return rounded;
-	if (!sophgo_rate_near(rounded, SOPHGO_ESC_HZ))
-		return -ERANGE;
-	ret = clk_set_rate(esc, rounded);
-	if (ret)
-		return ret;
-	ret = sophgo_clocks_ready(dsi);
-	if (ret)
-		return ret;
 
 	/* dsi_phy.c:_cal_pll_reg: disp_sel_bt_div1 only, read back before the first PHY access. */
 	ret = regmap_read(dsi->vip, VIP_CLK_CTRL0, &dsi->div_old);
@@ -865,34 +738,35 @@ static int sophgo_prepare(struct sophgo_dsi *dsi)
 		return ret;
 	dsi->phy_on = true;
 	sophgo_dphy_program(dsi);
-	return sophgo_mac_configure(dsi);
+	sophgo_rmw(dsi->mac + MAC_HS0, MAC_HS0_MASK, MAC_HS0_720P);
+	sophgo_rmw(dsi->mac + MAC_HS1, MAC_HS1_MASK, MAC_HS1_720P);
+	readl(dsi->mac + MAC_HS1);
+	return 0;
+disable_clocks:
+	clk_bulk_disable_unprepare(SOPHGO_CLK_COUNT, dsi->clocks);
+put_esc:
+	clk_rate_exclusive_put(esc);
+put_source:
+	clk_rate_exclusive_put(dsi->clocks[SOPHGO_CLK_DSI_SRC].clk);
+put_pll:
+	clk_rate_exclusive_put(dsi->clocks[SOPHGO_CLK_DISPPLL].clk);
+	return ret;
 }
 
 static int sophgo_release(struct sophgo_dsi *dsi)
 {
 	struct clk *esc = dsi->clocks[SOPHGO_CLK_DSI_ESC].clk;
-	unsigned int val;
+	u32 val;
 	int ret;
 
 	if (dsi->phy_on) {
-		sophgo_dphy_power_down(dsi->phy);
+		/* scaler.c:sclr_disp_set_intf(DISABLE) -> dsi_phy.c:dphy_init. */
+		sophgo_rmw(dsi->phy + DPHY_EN, 0x3f, 0);
+		sophgo_rmw(dsi->phy + DPHY_MAP, 0xfffff, 0);
+		sophgo_rmw(dsi->phy + 0x44, 0x1f1f1f1f, 0);
+		sophgo_rmw(dsi->phy + 0x64, 0x1f1f, 0x1f1f);
+		readl(dsi->phy + 0x64);
 		dsi->phy_on = false;
-	}
-	if (dsi->esc_set) {
-		ret = clk_set_parent(esc, dsi->esc_old_parent);
-		if (ret)
-			return ret;
-		ret = clk_set_rate(esc, dsi->esc_old_rate);
-		if (ret)
-			return ret;
-		if (!clk_is_match(clk_get_parent(esc), dsi->esc_old_parent) ||
-		    clk_get_rate(esc) != dsi->esc_old_rate)
-			return -ERANGE;
-		dsi->esc_set = false;
-	}
-	if (dsi->esc_held) {
-		clk_rate_exclusive_put(esc);
-		dsi->esc_held = false;
 	}
 	if (dsi->div_set) {
 		ret = regmap_update_bits(dsi->vip, VIP_CLK_CTRL0, VIP_DISP_SEL_BT_DIV1,
@@ -906,55 +780,57 @@ static int sophgo_release(struct sophgo_dsi *dsi)
 			return -EIO;
 		dsi->div_set = false;
 	}
-	if (dsi->bt_on) {
-		clk_disable_unprepare(dsi->bt);
-		dsi->bt_on = false;
-	}
 	if (dsi->clocks_on) {
+		clk_disable_unprepare(dsi->bt);
 		clk_bulk_disable_unprepare(SOPHGO_CLK_COUNT, dsi->clocks);
-		dsi->clocks_on = false;
-	}
-	if (dsi->pll_held) {
+		clk_rate_exclusive_put(esc);
 		clk_rate_exclusive_put(dsi->clocks[SOPHGO_CLK_DISPPLL].clk);
-		dsi->pll_held = false;
-	}
-	if (dsi->source_held) {
 		clk_rate_exclusive_put(dsi->clocks[SOPHGO_CLK_DSI_SRC].clk);
-		dsi->source_held = false;
+		dsi->clocks_on = false;
 	}
 	return 0;
 }
 
-static int sophgo_stop(struct sophgo_dsi *dsi)
+/* The encoder stops transmission before the bridge's post_disable. */
+static int sophgo_quiesce(struct sophgo_dsi *dsi)
 {
 	int ret;
 
 	lockdep_assert_held(&dsi->lock);
-	drm_atomic_bridge_chain_disable(dsi->bridge, NULL);
-	if (dsi->mmio_ready) {
-		ret = sophgo_mac_quiesce(dsi);
-		sophgo_fail(dsi, ret);
-		if (ret)
-			return ret;
-		sophgo_reader_input_off(dsi);
-		sophgo_display_stop(dsi);
-		ret = sophgo_reader_quiesce(dsi);
-		sophgo_fail(dsi, ret);
-		if (ret)
-			return ret;
-		dsi->mmio_ready = false;
-	}
-	drm_atomic_bridge_chain_post_disable(dsi->bridge, NULL);
-	if (dsi->status.supplies_owned)
-		return dsi->status.error ?: -EBUSY;
-	ret = sophgo_release(dsi);
-	sophgo_fail(dsi, ret);
+	if (!dsi->mmio_ready)
+		return 0;
+	ret = sophgo_mac_quiesce(dsi);
 	if (ret)
 		return ret;
-	sophgo_reader_release(dsi);
-	return 0;
+	sophgo_reader_input_off(dsi);
+	sophgo_display_stop(dsi);
+	ret = sophgo_reader_quiesce(dsi);
+	if (!ret)
+		dsi->mmio_ready = false;
+	return ret;
 }
 
+/* CRTC disable releases the host after the bridge's post_disable. */
+static int sophgo_unprepare(struct sophgo_dsi *dsi)
+{
+	int ret;
+
+	if (dsi->mmio_ready)
+		return -EBUSY;
+	ret = sophgo_release(dsi);
+	if (!ret)
+		sophgo_reader_release(dsi);
+	return ret;
+}
+
+static int sophgo_stop(struct sophgo_dsi *dsi)
+{
+	int ret = sophgo_quiesce(dsi);
+
+	return ret ?: sophgo_unprepare(dsi);
+}
+
+/* CRTC enable prepares LP-11 and the reader before bridge pre_enable runs. */
 static int sophgo_start(struct sophgo_dsi *dsi)
 {
 	int ret;
@@ -962,36 +838,57 @@ static int sophgo_start(struct sophgo_dsi *dsi)
 	lockdep_assert_held(&dsi->lock);
 	if (sophgo_owned(dsi))
 		return -EBUSY;
-	memset(&dsi->status, 0, sizeof(dsi->status));
+	dsi->error = 0;
 	ret = sophgo_prepare(dsi);
 	if (ret)
 		goto fail;
 	sophgo_display_start(dsi);
 	ret = sophgo_reader_start(dsi);
-	if (ret)
-		goto fail;
-	drm_bridge_chain_mode_set(dsi->bridge, &sophgo_720p, &sophgo_720p);
-	drm_atomic_bridge_chain_pre_enable(dsi->bridge, NULL);
-	if (dsi->status.error)
-		goto fail;
-	ret = sophgo_clocks_ready(dsi);
-	if (ret)
-		goto fail;
-	ret = sophgo_mac_start(dsi);
-	if (ret)
-		goto fail;
-	drm_atomic_bridge_chain_enable(dsi->bridge, NULL);
-	if (!dsi->status.error && !dsi->status.started)
-		ret = -EIO;
-	if (ret || dsi->status.error)
-		goto fail;
-	dev_info(dsi->dev, "scanout started\n");
-	return 0;
+	if (!ret)
+		return 0;
 fail:
-	sophgo_fail(dsi, ret);
+	dsi->error = ret;
 	sophgo_stop(dsi);
-	return dsi->status.error;
+	return ret;
 }
+
+static void sophgo_encoder_enable(struct drm_encoder *encoder, struct drm_atomic_commit *state)
+{
+	struct sophgo_dsi *dsi = drm_to_dsi(encoder->dev);
+	int ret, prepare_error;
+
+	mutex_lock(&dsi->lock);
+	ret = prepare_error = dsi->error;
+	if (!ret)
+		ret = sophgo_mac_start(dsi);
+	if (ret) {
+		dsi->error = ret;
+		sophgo_stop(dsi);
+	}
+	mutex_unlock(&dsi->lock);
+	if (ret)
+		drm_err(encoder->dev, "%s failed: %d\n",
+			prepare_error ? "host preparation" : "DSI video start", ret);
+	else
+		dev_info(dsi->dev, "scanout started\n");
+}
+
+static void sophgo_encoder_disable(struct drm_encoder *encoder, struct drm_atomic_commit *state)
+{
+	struct sophgo_dsi *dsi = drm_to_dsi(encoder->dev);
+	int ret;
+
+	mutex_lock(&dsi->lock);
+	ret = sophgo_quiesce(dsi);
+	mutex_unlock(&dsi->lock);
+	if (ret)
+		drm_err(encoder->dev, "host quiesce failed: %d\n", ret);
+}
+
+static const struct drm_encoder_helper_funcs sophgo_encoder_helpers = {
+	.atomic_enable = sophgo_encoder_enable,
+	.atomic_disable = sophgo_encoder_disable,
+};
 
 static int sophgo_kms_plane_check(struct drm_plane *plane, struct drm_atomic_commit *state)
 {
@@ -1012,7 +909,7 @@ static int sophgo_kms_plane_check(struct drm_plane *plane, struct drm_atomic_com
 
 static int sophgo_kms_flip(struct sophgo_dsi *dsi, const struct drm_plane_state *ps)
 {
-	unsigned int expected[SOPHGO_RD_LATCH];
+	u32 expected[DISP_RD_LATCH];
 	struct sophgo_reader_plan plan;
 	int ret;
 
@@ -1021,14 +918,20 @@ static int sophgo_kms_flip(struct sophgo_dsi *dsi, const struct drm_plane_state 
 	if (sophgo_owned(dsi) && plan.word[0] == dsi->plan.word[0] &&
 	    plan.word[1] == dsi->plan.word[1])
 		return 0;
-	if (!dsi->reader_applied || dsi->latch_failed)
+	if (!dsi->flips_ok)
 		ret = -EBUSY;
 	else if (!ret && plan.word[6] != dsi->plan.word[6])
 		ret = -EOPNOTSUPP;
 	if (!ret && !sophgo_reader_hold(dsi, plan.gem))
 		ret = -EBUSY;
 	if (!ret) {
-		sophgo_flip_apply(dsi->disp, &plan, expected);
+		sophgo_reader_observe(dsi->disp, expected);
+		expected[0] = plan.word[0];
+		expected[1] = plan.word[1];
+		sophgo_disp_shadow_begin(dsi->disp);
+		writel(expected[0], dsi->disp + DISP_RD_ADDR0_L);
+		writel(expected[1], dsi->disp + DISP_RD_ADDR0_L + 4);
+		sophgo_disp_shadow_end(dsi->disp);
 		ret = sophgo_reader_latch(dsi, expected);
 	}
 	if (!ret) {
@@ -1093,17 +996,15 @@ static int sophgo_kms_crtc_check(struct drm_crtc *crtc, struct drm_atomic_commit
 static void sophgo_kms_crtc_enable(struct drm_crtc *crtc, struct drm_atomic_commit *state)
 {
 	struct sophgo_dsi *dsi = drm_to_dsi(crtc->dev);
-	int ret = -EBUSY;
 
 	mutex_lock(&dsi->lock);
+	dsi->error = -EBUSY;
 	if (dsi->peripheral && !sophgo_owned(dsi)) {
 		/* This commit's primary state; an off-screen one skipped the plane check. */
 		dsi->plan_refused = sophgo_plan(crtc->primary->state, &dsi->plan);
-		ret = sophgo_start(dsi);
+		dsi->error = sophgo_start(dsi);
 	}
 	mutex_unlock(&dsi->lock);
-	if (ret)
-		drm_err(crtc->dev, "scanout start failed: %d\n", ret);
 }
 
 static void sophgo_kms_crtc_disable(struct drm_crtc *crtc, struct drm_atomic_commit *state)
@@ -1113,10 +1014,10 @@ static void sophgo_kms_crtc_disable(struct drm_crtc *crtc, struct drm_atomic_com
 
 	mutex_lock(&dsi->lock);
 	if (sophgo_owned(dsi))
-		ret = sophgo_stop(dsi);
+		ret = sophgo_unprepare(dsi);
 	mutex_unlock(&dsi->lock);
 	if (ret)
-		drm_err(crtc->dev, "scanout stop failed, pipeline held: %d\n", ret);
+		drm_err(crtc->dev, "host release failed: %d\n", ret);
 }
 
 static int sophgo_kms_get_modes(struct drm_connector *connector)
@@ -1151,17 +1052,6 @@ static const struct drm_crtc_helper_funcs sophgo_kms_crtc_helpers = {
 	.atomic_disable = sophgo_kms_crtc_disable,
 };
 
-static const struct drm_connector_funcs sophgo_kms_connector_funcs = {
-	.reset = drm_atomic_helper_connector_reset,
-	.fill_modes = drm_helper_probe_single_connector_modes,
-	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
-	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
-};
-
-static const struct drm_connector_helper_funcs sophgo_kms_connector_helpers = {
-	.get_modes = sophgo_kms_get_modes,
-};
-
 static const struct drm_mode_config_funcs sophgo_kms_mode_config_funcs = {
 	.fb_create = drm_gem_fb_create,
 	.atomic_check = drm_atomic_helper_check,
@@ -1180,11 +1070,11 @@ static const struct drm_driver sophgo_drm_driver = {
 	.major = 1,
 };
 
-/* The host encoder gets the CRTC only for validation. */
 static int sophgo_kms_init(struct sophgo_dsi *dsi)
 {
 	struct drm_device *drm = &dsi->drm;
 	struct sophgo_kms *kms;
+	struct drm_connector *connector;
 	int ret;
 
 	drm->mode_config.min_width = SOPHGO_SO_WIDTH;
@@ -1204,19 +1094,16 @@ static int sophgo_kms_init(struct sophgo_dsi *dsi)
 	if (ret)
 		return ret;
 	drm_crtc_helper_add(&kms->crtc, &sophgo_kms_crtc_helpers);
-	ret = drmm_encoder_init(drm, &kms->encoder, NULL, DRM_MODE_ENCODER_NONE, NULL);
-	if (ret)
-		return ret;
-	kms->encoder.possible_crtcs = drm_crtc_mask(&kms->crtc);
-	dsi->encoder.possible_crtcs = kms->encoder.possible_crtcs;
-	ret = drmm_connector_init(drm, &kms->connector, &sophgo_kms_connector_funcs,
-				  DRM_MODE_CONNECTOR_HDMIA, NULL);
-	if (ret)
-		return ret;
-	drm_connector_helper_add(&kms->connector, &sophgo_kms_connector_helpers);
-	ret = drm_connector_attach_encoder(&kms->connector, &kms->encoder);
-	if (ret)
-		return ret;
+	dsi->encoder.possible_crtcs = drm_crtc_mask(&kms->crtc);
+	connector = drm_bridge_connector_init(drm, &dsi->encoder);
+	if (IS_ERR(connector))
+		return PTR_ERR(connector);
+	/* Keep the bridge connector's hooks, replacing only fixed-mode enumeration. */
+	kms->connector_helpers = *connector->helper_private;
+	kms->connector_helpers.get_modes = sophgo_kms_get_modes;
+	drm_connector_helper_add(connector, &kms->connector_helpers);
+	/* This fixed-mode output has no HPD input or EDID dependency. */
+	connector->force = DRM_FORCE_ON;
 	drm_mode_config_reset(drm);
 	return 0;
 }
@@ -1276,7 +1163,7 @@ static const struct drm_encoder_funcs sophgo_encoder_funcs = {
 /*
  * The bridge attaches from its own probe, after drm_bridge_add(). lontium-lt8912b.c
  * registers "lt8912" with RGB888, VIDEO | LPM | NO_HFP | NO_EOT_PACKET and its DT
- * data-lanes; only that peripheral, on two lanes, is accepted. It sends no commands.
+ * data-lanes. The host accepts RGB888 video on two lanes and sends no commands.
  */
 static int sophgo_dsi_attach(struct mipi_dsi_host *host, struct mipi_dsi_device *device)
 {
@@ -1285,11 +1172,11 @@ static int sophgo_dsi_attach(struct mipi_dsi_host *host, struct mipi_dsi_device 
 	struct device_link *link;
 	int ret;
 
-	if (strcmp(device->name, "lt8912") || device->format != MIPI_DSI_FMT_RGB888 ||
+	if (device->format != MIPI_DSI_FMT_RGB888 ||
 	    !(device->mode_flags & MIPI_DSI_MODE_VIDEO))
 		return -EINVAL;
 	if (device->lanes != 2) {
-		dev_err(dsi->dev, "LT8912B attached with %u data lanes, only 2 are supported\n",
+		dev_err(dsi->dev, "DSI peripheral attached with %u data lanes, only 2 are supported\n",
 			device->lanes);
 		return -EINVAL;
 	}
@@ -1324,9 +1211,9 @@ static int sophgo_dsi_attach(struct mipi_dsi_host *host, struct mipi_dsi_device 
 		drm_encoder_cleanup(&dsi->encoder);
 		goto unlink;
 	}
-	lt8912b_pipeline_bind(dsi->bridge, &dsi->status);
+	drm_encoder_helper_add(&dsi->encoder, &sophgo_encoder_helpers);
 	dsi->peripheral = device;
-	dev_info(dsi->dev, "LT8912B attached with %u data lanes\n", device->lanes);
+	dev_info(dsi->dev, "DSI peripheral attached with %u data lanes\n", device->lanes);
 	if (dsi->kms_state == SOPHGO_KMS_OFF)
 		schedule_work(&dsi->kms_work);
 	goto unlock;
@@ -1351,10 +1238,8 @@ static int sophgo_dsi_detach(struct mipi_dsi_host *host, struct mipi_dsi_device 
 		mutex_unlock(&dsi->lock);
 		return -EINVAL;
 	}
-	/* A failed stop keeps its resources; the departing bridge is let go regardless. */
 	if (sophgo_owned(dsi) && sophgo_stop(dsi))
 		dev_err(dsi->dev, "display pipeline still owned after a failed stop\n");
-	lt8912b_pipeline_bind(dsi->bridge, NULL);
 	drm_encoder_cleanup(&dsi->encoder);
 	drm_bridge_put(dsi->bridge);
 	dsi->bridge = NULL;
@@ -1414,9 +1299,6 @@ static int sophgo_dsi_probe(struct platform_device *pdev)
 	ret = devm_clk_bulk_get(dev, SOPHGO_CLK_COUNT, dsi->clocks);
 	if (ret)
 		return dev_err_probe(dev, ret, "display clocks unavailable\n");
-	dsi->esc_parent = devm_clk_get(dev, "esc_parent");
-	if (IS_ERR(dsi->esc_parent))
-		return PTR_ERR(dsi->esc_parent);
 	/* The vendor mipi_tx node's clk_bt; unheld, clk_disable_unused turns it off. */
 	dsi->bt = devm_clk_get(dev, "bt_vip");
 	if (IS_ERR(dsi->bt))
@@ -1450,6 +1332,7 @@ static void sophgo_dsi_shutdown(struct platform_device *pdev)
 {
 	struct sophgo_dsi *dsi = platform_get_drvdata(pdev);
 
+	sophgo_kms_unplug(dsi);
 	mutex_lock(&dsi->lock);
 	if (dsi->peripheral && sophgo_owned(dsi) && sophgo_stop(dsi))
 		dev_err(dsi->dev, "display pipeline still owned after a failed stop\n");
@@ -1482,6 +1365,6 @@ static struct platform_driver sophgo_dsi_platform_driver = {
 };
 module_platform_driver(sophgo_dsi_platform_driver);
 
-MODULE_DESCRIPTION("Sophgo SG2000 DSI host: fixed 720p HDMI scanout through the LT8912B");
-MODULE_AUTHOR("BadgeOS contributors");
+MODULE_DESCRIPTION("Sophgo SG2000 DSI host: fixed 720p scanout through a bridge");
+MODULE_AUTHOR("Nick Detello");
 MODULE_LICENSE("GPL");
