@@ -60,6 +60,9 @@ pkgs.runCommand "dtb-licheerv-nano" { nativeBuildInputs = [ pkgs.dtc ]; } ''
 
     p=$6
     is $p /backlight compatible pwm-backlight
+    is $p /backlight brightness-levels "0 10 20 30 40 50" u
+    is $p /backlight brightness-levels-scale 100 u
+    is $p /backlight default-brightness-level 2 u
     is $p /soc/pwm@3062000 status okay
     is $p /soc/cvi_vpss interrupt-names sc
     is $p /soc/i2c@4040000 status okay

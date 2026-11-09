@@ -165,6 +165,10 @@ in
     patch = ./lt8912b-hdmi-audio.patch;
   }
   {
+    name = "pwm-backlight-brightness-scale";
+    patch = ./pwm-backlight-brightness-scale.patch;
+  }
+  {
     name = "hynitron-cstxxx-firmware-probe";
     patch = ./hynitron-cstxxx-firmware-probe.patch;
   }
