@@ -36,8 +36,30 @@ let
       lib.optionalString (cfg.outputMode != "native") ''
         # Back to the desktop mode, for an app that died with the output switched.
         bindsym $mod+Shift+m exec swaymsg output ${cfg.outputName} mode ${cfg.outputMode}''
-    }${lib.optionalString (cfg.extraConfig != "") "\n\n${cfg.extraConfig}"}
+    }${
+      lib.optionalString (cfg.extraConfig != "") "\n\n${cfg.extraConfig}"
+    }${lib.optionalString cfg.touchBar.enable touchBar}
   '';
+
+  # A bar of large blocks, one per entry, that launch their command when tapped.
+  touchBar = ''
+
+
+    bar {
+      id touch
+      output ${cfg.outputName}
+      position bottom
+      height 72
+      font pango:DejaVu Sans 20
+      workspace_buttons no
+      status_command ${
+        lib.getExe (pkgs.badge-touch-bar.override { sway = config.programs.sway.package; })
+      } ${lib.escapeShellArg cfg.outputName} ${
+        pkgs.writeText "badge-touch-bar-entries" (
+          lib.concatMapStrings (e: "${e.label}=${e.command}\n") cfg.touchBar.entries
+        )
+      }
+    }'';
 in
 {
   options.badge.graphics = {
@@ -71,6 +93,29 @@ in
       description = "Lines appended to the sway config.";
     };
 
+    touchBar = {
+      enable = lib.mkEnableOption "a bar of large blocks that launch apps when tapped";
+      entries = lib.mkOption {
+        type = lib.types.listOf (
+          lib.types.submodule {
+            options = {
+              label = lib.mkOption {
+                type = lib.types.strMatching "[^=\n\r\t]+";
+                description = "Text displayed on the block.";
+              };
+              command = lib.mkOption {
+                type = lib.types.singleLineStr;
+                description = "Shell command launched through sway when tapped.";
+              };
+            };
+          }
+        );
+        default = [ ];
+        description = "The bar's blocks, left to right: a label and the command a tap runs.";
+      };
+
+    };
+
     autostart = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -80,6 +125,11 @@ in
   };
 
   config = lib.mkIf (config.hardware.sg2k.enable && cfg.enable) {
+    assertions = lib.optional cfg.touchBar.enable {
+      assertion = cfg.touchBar.entries != [ ];
+      message = "badge.graphics.touchBar.entries must not be empty when the bar is enabled";
+    };
+
     # Mesa and SDL3 trimmed, then the pkgs/patches package patches.
     nixpkgs.overlays = [
       (import ../../pkgs/v2/overlays/graphics.nix)

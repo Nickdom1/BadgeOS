@@ -5,6 +5,9 @@
   stdenv,
   callPackage,
   sdl3,
+  width ? 1280,
+  height ? 720,
+  fullscreen ? true,
 }:
 stdenv.mkDerivation (finalAttrs: {
   pname = "nix-fixes-this";
@@ -22,7 +25,8 @@ stdenv.mkDerivation (finalAttrs: {
 
   buildPhase = ''
     runHook preBuild
-    $CC -O3 -ffast-math -Wall demo.c -o nix-fixes-this -lSDL3 -lm
+    $CC -O3 -ffast-math -Wall -DW=${toString width} -DH=${toString height} \
+      -DFULLSCREEN=${if fullscreen then "1" else "0"} demo.c -o nix-fixes-this -lSDL3 -lm
     runHook postBuild
   '';
 

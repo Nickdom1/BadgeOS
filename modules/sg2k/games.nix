@@ -78,7 +78,7 @@ let
   '';
 
   # "Nix Fixes This", a 640x360 CPU-rendered demoscene prod with a chiptune.
-  badge-demo-bin = pkgs.nix-fixes-this;
+  badge-demo-bin = cfg.demoPackage;
   badge-demo = pkgs.writeShellScriptBin "badge-demo" ''
     export SDL_VIDEODRIVER="''${SDL_VIDEODRIVER:-wayland}"
     export SDL_AUDIODRIVER="''${SDL_AUDIODRIVER:-alsa}"
@@ -97,6 +97,12 @@ in
       type = lib.types.bool;
       default = false;
       description = ''Install the "Nix Fixes This" demoscene prod (badge-demo).'';
+    };
+
+    demoPackage = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.nix-fixes-this;
+      description = "Nix Fixes This package launched by badge-demo.";
     };
 
     autostartDemo = lib.mkOption {

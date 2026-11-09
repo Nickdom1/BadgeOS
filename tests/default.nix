@@ -76,6 +76,24 @@ else
       };
     };
     graphics-24bpp = import ./graphics-24bpp.nix { pkgs = pkgs; };
+    touch-bar =
+      pkgs.runCommand "touch-bar"
+        {
+          nativeBuildInputs = [
+            pkgs.bash
+            pkgs.python3
+          ];
+        }
+        ''
+          timeout 15 python3 ${./touch-bar.py} ${../pkgs/v2/by-name/badge-touch-bar/badge-touch-bar.sh}
+          touch $out
+        '';
+    nix-fixes-this-panel =
+      (pkgs.nix-fixes-this.override {
+        width = 552;
+        height = 296;
+        fullscreen = false;
+      }).passthru.tests.selftest;
     desktop-dsi-panel = import ./desktop-dsi-panel.nix {
       inherit pkgs;
       sys = self.nixosConfigurations."licheerv-nano-riscv-${shortArch system}";

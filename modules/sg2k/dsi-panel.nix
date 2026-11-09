@@ -26,6 +26,27 @@ in
     badge.graphics = lib.mkIf config.badge.graphics.enable {
       outputName = lib.mkDefault "DSI-1";
       outputMode = lib.mkDefault "native";
+      demo = lib.mkDefault true;
+      demoPackage = lib.mkDefault (
+        pkgs.nix-fixes-this.override {
+          width = 552;
+          height = if config.badge.graphics.touchBar.enable then 296 else 368;
+          fullscreen = false;
+        }
+      );
+      touchBar = {
+        enable = lib.mkDefault true;
+        entries = lib.mkDefault [
+          {
+            label = "Demo";
+            command = "badge-demo";
+          }
+          {
+            label = "Close";
+            command = "swaymsg kill";
+          }
+        ];
+      };
       extraConfig = ''
         output ${config.badge.graphics.outputName} transform 90
         input type:touch map_to_output ${config.badge.graphics.outputName}

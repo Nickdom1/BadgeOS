@@ -26,6 +26,16 @@ let
     ++ lib.optional (
       !has "input type:touch map_to_output DSI-1\n" swayText
     ) "sway config does not map touch to DSI-1"
+    ++ lib.optional (
+      !has "id touch" swayText || !has "/bin/badge-touch-bar" swayText
+    ) "sway config has no touch bar"
+    ++ lib.optional (!desktop.badge.graphics.demo) "panel demo is not installed"
+    ++ lib.optional (
+      map (e: e.label) desktop.badge.graphics.touchBar.entries != [
+        "Demo"
+        "Close"
+      ]
+    ) "panel touch bar does not offer Demo and Close"
     ++ lib.optional desktop.hardware.sg2k.display.autoLoadDrm "soph_drm loads before the panel is up"
     ++ lib.optional (
       !lib.any (has "modprobe soph_drm") desktop.systemd.services.st7701-panel-init.serviceConfig.ExecStartPost
