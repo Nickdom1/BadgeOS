@@ -22,7 +22,14 @@ let
     lib.optional (!has "output DSI-1 position 0 0\n" swayText) "sway config does not place DSI-1"
     ++ lib.optional (has "output DSI-1 mode" swayText) "sway config sets a mode on DSI-1"
     ++ lib.optional (has "HDMI-A-1" swayText) "sway config mentions HDMI-A-1"
-    ++ lib.optional (!has "output DSI-1 transform 90\n" swayText) "sway config does not turn DSI-1"
+    ++ lib.optional (has "output DSI-1 transform" swayText) "sway rotates the hardware-rotated output"
+    ++ lib.optional (desktop.hardware.sg2k.display.rotation != 90) "panel hardware rotation is not 90"
+    ++ lib.optional (
+      !has "options soph_drm rotation=90" desktop.boot.extraModprobeConfig
+    ) "missing rotation parameter"
+    ++ lib.optional (
+      !has "input type:touch calibration_matrix 0 1 0 -1 0 1" swayText
+    ) "touch does not undo the output rotation"
     ++ lib.optional (
       !has "input type:touch map_to_output DSI-1\n" swayText
     ) "sway config does not map touch to DSI-1"

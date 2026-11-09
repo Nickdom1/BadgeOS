@@ -99,6 +99,20 @@ in
       '';
     };
 
+    rotation = lib.mkOption {
+      type = lib.types.enum [
+        0
+        90
+        270
+      ];
+      default = 0;
+      description = ''
+        Rotate packed RGB scanout clockwise in the SoC rotator. Quarter turns
+        expose a mode with swapped dimensions and require padded RGB888 buffers.
+        HDMI rotation is untested.
+      '';
+    };
+
     drmDevice = lib.mkOption {
       type = lib.types.str;
       default = "";
@@ -111,6 +125,13 @@ in
   };
 
   config = lib.mkIf (config.hardware.sg2k.enable && cfg.enable) {
+    assertions = [
+      {
+        assertion = cfg.rotation == 0 || config.hardware.sg2k.dsiPanel.enable || hdmi.enable;
+        message = "hardware.sg2k.display.rotation needs a DSI panel or HDMI output";
+      }
+    ];
+    badge.graphics.outputMode = lib.mkIf (cfg.rotation != 0) (lib.mkDefault "native");
     boot.extraModulePackages = [ soph-display ];
     hardware.firmware = [ soph-vpu-firmware ];
     environment.systemPackages = [
@@ -138,11 +159,15 @@ in
 
     # The LT8912B bridge's node is in the desktop profile's DTB only, where sway drives
     # it: both soph_drm modes drive a 720p line, so force_720p pins the bridge to it.
-    boot.extraModprobeConfig = lib.mkIf graphics ''
-      options lontium_lt8912b hactive_offset=${toString hdmi.hactiveOffset} hdmi_audio=${
-        if hdmi.audio then "1" else "0"
-      } force_720p=1
-    '';
+    boot.extraModprobeConfig =
+      lib.optionalString (cfg.rotation != 0) ''
+        options soph_drm rotation=${toString cfg.rotation}
+      ''
+      + lib.optionalString graphics ''
+        options lontium_lt8912b hactive_offset=${toString hdmi.hactiveOffset} hdmi_audio=${
+          if hdmi.audio then "1" else "0"
+        } force_720p=1
+      '';
 
     boot.blacklistedKernelModules = allModules ++ drmOrder;
 

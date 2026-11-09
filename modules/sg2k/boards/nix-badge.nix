@@ -26,6 +26,7 @@ in
         pkgs.sg2k-dtb.override {
           board = "nix-badge";
           inherit (config.hardware.sg2k) core;
+          dtsFragments = lib.optional (config.hardware.sg2k.display.rotation != 0) "soph-rotation.dtsi";
         }
       );
       firmware.fips = mkDefault (

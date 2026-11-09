@@ -13,6 +13,7 @@
       "sg2000-nix-badge-riscv.dts"
       "sg2000-module-01.dtsi"
       "sg200x-vip.dtsi"
+      "soph-rotation.dtsi"
       "nix-badge.dtsi"
       "sg200x-riscv.dtsi"
       "lt8912b-bridge.dtsi"
@@ -38,6 +39,7 @@
       "licheerv-nano-no-ethernet.dtsi"
       "licheerv-nano-dsi-panel.dtsi"
       "sg200x-vip.dtsi"
+      "soph-rotation.dtsi"
     ];
   };
 }

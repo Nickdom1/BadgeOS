@@ -20,6 +20,7 @@ in
     ];
 
     hardware.sg2k.display.enable = lib.mkDefault true;
+    hardware.sg2k.display.rotation = lib.mkDefault 90;
     hardware.sg2k.display.drmDevice = lib.mkDefault "/dev/dri/badge-panel";
 
     # Sway on the panel, turned to the carrier's landscape, with touch on it.
@@ -48,8 +49,16 @@ in
         ];
       };
       extraConfig = ''
-        output ${config.badge.graphics.outputName} transform 90
+        ${lib.optionalString (
+          cfg.display.rotation == 0
+        ) "output ${config.badge.graphics.outputName} transform 90"}
         input type:touch map_to_output ${config.badge.graphics.outputName}
+        ${lib.optionalString (
+          cfg.display.rotation == 90
+        ) "input type:touch calibration_matrix 0 1 0 -1 0 1"}
+        ${lib.optionalString (
+          cfg.display.rotation == 270
+        ) "input type:touch calibration_matrix 0 -1 1 1 0 0"}
       '';
     };
 
